@@ -1,3 +1,7 @@
 voices/**/*
 audio-cache/
 .env
+
+# Dev-only symlinks for local skill discovery; not portable across machines.
+.agents/skills/google-agent-skills
+.claude/skills

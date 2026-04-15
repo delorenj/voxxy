@@ -16,7 +16,6 @@ order.
 
 from __future__ import annotations
 
-import asyncio
 import io
 import logging
 import os
@@ -67,9 +66,14 @@ class SynthEngine(Protocol):
 class VoxCPMEngine:
     """Local VoxCPM2 via the existing Synth wrapper.
 
-    Wraps the blocking generate() in ``asyncio.to_thread`` so the event loop
-    stays responsive. Synth itself already handles memory containment and
-    reference-audio trimming; we're just an adapter.
+    Calls the blocking generate() directly on the event loop thread. Offloading
+    to ``asyncio.to_thread`` was tempting (keeps other requests responsive
+    during the ~2s synth) but breaks torch.compile / cudagraph_trees: the
+    compiled graph stores state in thread-local storage initialized on the
+    main thread, and calling from a worker thread hits an AssertionError in
+    torch._inductor.cudagraph_trees.get_obj. For this single-concurrency
+    GPU-bound service, blocking the loop is the right tradeoff. If concurrency
+    ever matters more than inference speed, flip VOX_OPTIMIZE=0 and revisit.
     """
 
     name = "voxcpm"
@@ -93,23 +97,19 @@ class VoxCPMEngine:
         steps: int = 10,
     ) -> SynthResult:
         # voice_id is the ElevenLabs-side concept; local engine ignores it.
-        def _run():
-            wav, sr = self._synth.generate(
-                text=text,
-                reference_wav_path=reference_wav_path,
-                prompt_wav_path=reference_wav_path if prompt_text else None,
-                prompt_text=prompt_text,
-                cfg_value=cfg,
-                inference_timesteps=steps,
-                normalize=False,
-                denoise=False,
-            )
-            buf = io.BytesIO()
-            sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
-            return buf.getvalue(), sr
-
-        wav_bytes, sr = await asyncio.to_thread(_run)
-        return SynthResult(wav_bytes=wav_bytes, sample_rate=sr, engine=self.name)
+        wav, sr = self._synth.generate(
+            text=text,
+            reference_wav_path=reference_wav_path,
+            prompt_wav_path=reference_wav_path if prompt_text else None,
+            prompt_text=prompt_text,
+            cfg_value=cfg,
+            inference_timesteps=steps,
+            normalize=False,
+            denoise=False,
+        )
+        buf = io.BytesIO()
+        sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
+        return SynthResult(wav_bytes=buf.getvalue(), sample_rate=sr, engine=self.name)
 
 
 # ElevenLabs "eleven_turbo_v2_5" is the current cheap+fast model. PCM output
@@ -225,7 +225,12 @@ class EngineOrchestrator:
                 return result
             except Exception as exc:  # noqa: BLE001 - deliberately broad
                 last_exc = exc
-                logger.warning("engine %s failed: %s", engine.name, exc)
+                # repr() because many torch/voxcpm exceptions have empty str().
+                # Keep a traceback for diagnostic logs; stays on the WARNING
+                # level so it's filterable.
+                logger.warning(
+                    "engine %s failed: %r", engine.name, exc, exc_info=True,
+                )
                 continue
         # All engines failed. Raise the last error for the caller to translate.
         raise RuntimeError(
