@@ -1,0 +1,49 @@
+<script type="text/javascript">
+  RED.nodes.registerType("vox-tts", {
+    category: "function",
+    color: "#c7e9b4",
+    defaults: {
+      name:  { value: "" },
+      url:   { value: "http://vox:8000", required: true },
+      voice: { value: "" },
+      cfg:   { value: 2.0, validate: RED.validators.number() },
+      steps: { value: 10,  validate: RED.validators.number() }
+    },
+    inputs: 1,
+    outputs: 1,
+    icon: "font-awesome/fa-volume-up",
+    label: function () { return this.name || "vox"; },
+    paletteLabel: "vox tts"
+  });
+</script>
+
+<script type="text/html" data-template-name="vox-tts">
+  <div class="form-row"><label for="node-input-name">Name</label>
+    <input type="text" id="node-input-name" placeholder="Name"></div>
+  <div class="form-row"><label for="node-input-url">Service URL</label>
+    <input type="text" id="node-input-url" placeholder="http://vox:8000"></div>
+  <div class="form-row"><label for="node-input-voice">Voice (optional)</label>
+    <input type="text" id="node-input-voice" placeholder="rick"></div>
+  <div class="form-row"><label for="node-input-cfg">CFG</label>
+    <input type="number" step="0.1" id="node-input-cfg"></div>
+  <div class="form-row"><label for="node-input-steps">Steps</label>
+    <input type="number" id="node-input-steps"></div>
+</script>
+
+<script type="text/html" data-help-name="vox-tts">
+  <p>Synthesize speech using the vox service (VoxCPM2).</p>
+  <h3>Inputs</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">string</span></dt>
+    <dd>Text to synthesize.</dd>
+    <dt>voice <span class="property-type">string</span></dt>
+    <dd>Optional voice name override, e.g. <code>rick</code>.</dd>
+  </dl>
+  <h3>Outputs</h3>
+  <dl class="message-properties">
+    <dt>payload <span class="property-type">Buffer</span></dt>
+    <dd>Generated WAV audio.</dd>
+    <dt>contentType <span class="property-type">string</span></dt>
+    <dd><code>audio/wav</code>.</dd>
+  </dl>
+</script>

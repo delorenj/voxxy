@@ -1,0 +1,13 @@
+{
+  "name": "node-red-contrib-vox",
+  "version": "0.1.0",
+  "description": "Text-to-speech node for vox (VoxCPM2) service",
+  "keywords": ["node-red", "tts", "voxcpm", "audio"],
+  "license": "MIT",
+  "node-red": {
+    "nodes": {
+      "vox-tts": "vox-tts.js"
+    }
+  },
+  "dependencies": {}
+}

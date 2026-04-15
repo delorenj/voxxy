@@ -1,0 +1,29 @@
+[project]
+name = "vox-service"
+version = "0.1.0"
+description = "Universal TTS service wrapping VoxCPM2"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "fastmcp>=0.4",
+    "asyncpg>=0.30",
+    "pydantic>=2",
+    "python-multipart",
+    "soundfile",
+    "voxcpm==2.0.2",
+    "torch>=2.5.0,<2.7",
+    "torchaudio>=2.5.0,<2.7",
+]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }

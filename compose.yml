@@ -1,0 +1,53 @@
+services:
+  vox:
+    build: .
+    container_name: vox
+    restart: unless-stopped
+    # Host postgres is reachable via host.docker.internal (same trick pgadmin uses).
+    environment:
+      VOX_DATABASE_URL: postgresql://${DEFAULT_USERNAME}:${DEFAULT_PASSWORD}@host.docker.internal:5432/vox
+      VOX_VOICES_DIR: /data/voices
+      VOX_OPTIMIZE: "1"
+      VOX_REF_AUDIO_MAX_SECONDS: "30"
+      HF_HOME: /cache/huggingface
+      # expose the driver, not a hard-coded version, to match nvidia-smi
+    volumes:
+      # Voice profile WAVs (seeded + user-uploaded). Bind-mounted so you can
+      # scp/rsync new voices in without the API.
+      - ./voices:/data/voices
+      # Reuse host huggingface cache so we don't re-download the 4.58 GB
+      # VoxCPM2 weights on every image rebuild.
+      - /home/delorenj/.cache/huggingface:/cache/huggingface
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - proxy
+    # GPU passthrough (requires nvidia-container-runtime as default docker runtime
+    # OR explicit `--runtime=nvidia` in /etc/docker/daemon.json).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vox.rule=Host(`vox.delo.sh`)"
+      - "traefik.http.routers.vox.entrypoints=websecure"
+      - "traefik.http.routers.vox.tls.certresolver=letsencrypt"
+      - "traefik.http.services.vox.loadbalancer.server.port=8000"
+      - "traefik.docker.network=proxy"
+      # FastMCP streaming needs long-lived connections; bump timeouts.
+      - "traefik.http.middlewares.vox-sse.headers.customResponseHeaders.Cache-Control=no-cache"
+      - "traefik.http.routers.vox.middlewares=vox-sse"
+
+networks:
+  proxy:
+    external: true
