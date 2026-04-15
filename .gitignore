@@ -1,1 +1,3 @@
 voices/**/*
+audio-cache/
+.env

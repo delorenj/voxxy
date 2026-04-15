@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS voices (
     prompt_text  text,
     -- freeform tags for future filtering (e.g. {"rick", "cartoon", "male"})
     tags         text[]      NOT NULL DEFAULT '{}',
+    -- optional ElevenLabs voice id for the fallback engine (NULL = default)
+    elevenlabs_voice_id text,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now()
 );
