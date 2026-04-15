@@ -24,9 +24,19 @@ Voice profile metadata lives in a host postgres DB (`vox`); reference WAV bytes 
 
 ## Common commands
 
-Build + run (primary workflow — the service is GPU-bound and only sensibly runs in the container):
+Build + run (primary workflow — the service is GPU-bound and only sensibly runs in the container). Prefer the `mise` tasks; they wrap `docker compose` with `op run` so ElevenLabs / postgres secrets stay in 1password:
 ```bash
-docker compose up -d --build
+mise run up           # op run → docker compose up -d --build
+mise run logs         # docker logs -f vox
+mise run health       # curl /healthz
+mise run smoke        # speak_url → fetch → ffprobe verification
+mise tasks            # list everything, self-documenting
+```
+
+Raw compose still works if 1password is unavailable:
+```bash
+docker compose up -d --build   # requires DEFAULT_USERNAME, DEFAULT_PASSWORD,
+                               # ELEVENLABS_API_KEY in shell env or .env
 docker logs -f vox
 curl http://localhost:8000/healthz   # or https://vox.delo.sh/healthz via Traefik
 ```
@@ -44,9 +54,14 @@ uv add <pkg>                         # updates pyproject.toml + uv.lock
 # so rebuild the image after lock changes: docker compose build --no-cache vox
 ```
 
-DB schema (applied once against the host postgres):
+DB schema (applied once against the host postgres). Fresh install:
 ```bash
 psql -h localhost -U "$DEFAULT_USERNAME" -d vox -f init.sql
+```
+
+Incremental migrations against an existing DB:
+```bash
+mise run migrate      # applies every file under migrations/ in order
 ```
 
 There is no test suite, linter config, or CI in-repo yet. Don't invent commands for those.

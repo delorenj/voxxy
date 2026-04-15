@@ -1,0 +1,71 @@
+# mise tasks for vox-tts. Wraps docker compose invocations with `op run` so
+# secrets stay in 1password instead of on disk.
+#
+# Usage:
+#   mise run up           # build + start the service with secrets injected
+#   mise run down         # stop + remove the container
+#   mise run logs         # tail container logs
+#   mise run restart      # recreate container (picks up code changes)
+#   mise run health       # curl /healthz and pretty-print engine status
+#   mise run smoke        # end-to-end synthesize + fetch + probe
+#   mise run migrate      # apply the latest SQL migration against host postgres
+#   mise tasks            # list every task with descriptions
+
+[tools]
+# Pin nothing here; defer to the host. This file is task-focused, not env-focused.
+
+[env]
+# Path mise resolves against when running `op run`. Kept in-repo so it travels
+# with the code and is self-explanatory.
+VOX_OP_ENV_FILE = ".env.template"
+
+[tasks.up]
+description = "Build + start vox with secrets injected from 1password"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose up -d --build"
+
+[tasks.down]
+description = "Stop and remove the vox container"
+run = "docker compose down"
+
+[tasks.restart]
+description = "Recreate vox (picks up app/ code changes without a full rebuild)"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose up -d --build vox"
+
+[tasks.logs]
+description = "Tail vox container logs"
+run = "docker logs -f vox"
+
+[tasks.health]
+description = "Hit /healthz and pretty-print engine availability"
+run = "curl -fsS https://vox.delo.sh/healthz | python3 -m json.tool"
+
+[tasks.smoke]
+description = "End-to-end: synthesize via speak_url, fetch the URL, probe the codec"
+run = '''
+set -euo pipefail
+resp=$(curl -fsS -X POST https://vox.delo.sh/synthesize-url \
+  -H 'content-type: application/json' \
+  -d '{"text":"Vox smoke test.","voice":"rick"}')
+echo "$resp" | python3 -m json.tool
+url=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['audio_url'])")
+curl -fsSL "$url" -o /tmp/vox_smoke.ogg
+file /tmp/vox_smoke.ogg
+ffprobe -v error -show_entries stream=codec_name,sample_rate,channels \
+        -show_entries format=duration \
+        -of default=noprint_wrappers=1 /tmp/vox_smoke.ogg
+'''
+
+[tasks.migrate]
+description = "Apply SQL migrations against the host postgres `vox` database"
+run = '''
+set -euo pipefail
+for f in migrations/*.sql; do
+  echo "applying $f"
+  op run --env-file {{env.VOX_OP_ENV_FILE}} -- \
+    bash -c 'psql -h localhost -U "$DEFAULT_USERNAME" -d vox -f "$0"' "$f"
+done
+'''
+
+[tasks.build]
+description = "Rebuild the image without starting (use after Dockerfile / pyproject changes)"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose build vox"

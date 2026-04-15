@@ -38,11 +38,20 @@ One service, three transports, every delivery surface:
 
 ## Build + run
 
+Secrets live in 1password (`DeLoSecrets` vault). `mise.toml` wraps every docker
+invocation with `op run` so nothing plaintext ever lands on disk:
+
 ```bash
 cd ~/docker/stacks/utils/vox
-docker compose up -d --build
-docker logs -f vox
+mise run up           # build + start, secrets injected at compose time
+mise run logs         # tail
+mise run health       # /healthz + engine availability
+mise run smoke        # end-to-end synthesize → fetch → probe codec
+mise tasks            # see everything available
 ```
+
+If you prefer raw compose (no 1password dependency), populate `.env` from
+`.env.example` and run `docker compose up -d --build` directly.
 
 Healthcheck: `curl http://vox.delo.sh/healthz`
 
