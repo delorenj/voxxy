@@ -24,6 +24,9 @@ class Voice:
     duration_s: float
     prompt_text: Optional[str]
     tags: list[str]
+    # Optional ElevenLabs voice id for fallback synthesis. When None, the
+    # ElevenLabs engine uses its configured default voice.
+    elevenlabs_voice_id: Optional[str] = None
 
     @property
     def abs_path(self) -> Path:
@@ -44,7 +47,8 @@ class VoiceRepo:
 
     async def get(self, name: str) -> Optional[Voice]:
         row = await self._pool.fetchrow(
-            """SELECT name, display_name, wav_path, duration_s, prompt_text, tags
+            """SELECT name, display_name, wav_path, duration_s, prompt_text, tags,
+                      elevenlabs_voice_id
                FROM voices WHERE name = $1""",
             name,
         )
@@ -52,7 +56,8 @@ class VoiceRepo:
 
     async def list(self) -> list[Voice]:
         rows = await self._pool.fetch(
-            """SELECT name, display_name, wav_path, duration_s, prompt_text, tags
+            """SELECT name, display_name, wav_path, duration_s, prompt_text, tags,
+                      elevenlabs_voice_id
                FROM voices ORDER BY name"""
         )
         return [_row_to_voice(r) for r in rows]
@@ -99,4 +104,5 @@ def _row_to_voice(row) -> Voice:
         duration_s=float(row["duration_s"]),
         prompt_text=row["prompt_text"],
         tags=list(row["tags"] or []),
+        elevenlabs_voice_id=row["elevenlabs_voice_id"],
     )

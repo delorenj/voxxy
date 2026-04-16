@@ -1,21 +1,27 @@
 """vox-tts: universal TTS service.
 
-- HTTP API: POST /synthesize → audio/wav
-- MCP server mounted at /mcp (streamable HTTP transport) for Hermes/OpenClaw
+- HTTP API: POST /synthesize → audio/wav  (legacy; single-engine, no fallback)
+- HTTP API: POST /synthesize-url → JSON   (engine fallback + URL return)
+- Audio cache: GET /audio/{id}.ogg        (Telegram-ready OGG/Opus)
+- MCP at /mcp/ (streamable HTTP) for Hermes/OpenClaw/Claude Code
 - Voice profile CRUD at /voices
 - Health check at /healthz
 
 Environment:
   VOX_DATABASE_URL     postgres DSN (required)
   VOX_VOICES_DIR       directory holding voice WAVs (default: /data/voices)
-  VOX_HF_CACHE         huggingface cache path (inherited from HF_HOME usually)
+  VOX_AUDIO_CACHE_DIR  directory for cached OGG blobs (default: /data/audio-cache)
+  VOX_AUDIO_TTL_SECONDS  cache lifetime (default: 3600)
   VOX_OPTIMIZE=1       enable torch.compile (more VRAM, faster RTF)
   VOX_REF_AUDIO_MAX_SECONDS  max reference audio length (default 30)
   VOX_MAX_LEN          max generation token length (default 2048)
+  ELEVENLABS_API_KEY   enables the ElevenLabs fallback engine (optional)
+  ELEVENLABS_DEFAULT_VOICE  default ElevenLabs voice id (default: Adam)
 """
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -26,11 +32,14 @@ from pathlib import Path
 from typing import Optional
 
 import soundfile as sf
-from fastapi import FastAPI, HTTPException, Response, UploadFile, File, Form
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
+from app import audio as audio_codec
+from app import cache as audio_cache
+from app.engines import ElevenLabsEngine, EngineOrchestrator, SynthResult, VoxCPMEngine
 from app.synth import REF_AUDIO_MAX_SECONDS, Synth
 from app.voices import VOICES_DIR, Voice, VoiceRepo
 
@@ -43,6 +52,8 @@ logger = logging.getLogger("vox")
 # ---------- globals populated in lifespan ----------
 _synth: Synth | None = None
 _repo: VoiceRepo | None = None
+_engine: EngineOrchestrator | None = None
+_sweep_task: asyncio.Task | None = None
 
 
 # ---------- API models ----------
@@ -59,12 +70,27 @@ class SynthesizeRequest(BaseModel):
     denoise: bool = False
 
 
+class SynthesizeUrlResponse(BaseModel):
+    """Response shape shared by POST /synthesize-url and the speak_url MCP tool.
+
+    Clients that deliver audio elsewhere (Telegram sendVoice, browser <audio>,
+    Home Assistant media_player) can pass ``audio_url`` directly to those
+    surfaces. The third party fetches the OGG/Opus payload from us.
+    """
+    audio_url: str
+    engine: str
+    duration_s: Optional[float] = None
+    bytes: int
+    format: str = "ogg_opus"
+
+
 class VoiceOut(BaseModel):
     name: str
     display_name: str
     duration_s: float
     prompt_text: Optional[str] = None
     tags: list[str] = []
+    elevenlabs_voice_id: Optional[str] = None
 
     @classmethod
     def from_model(cls, v: Voice) -> "VoiceOut":
@@ -74,55 +100,97 @@ class VoiceOut(BaseModel):
             duration_s=v.duration_s,
             prompt_text=v.prompt_text,
             tags=v.tags,
+            elevenlabs_voice_id=v.elevenlabs_voice_id,
         )
 
 
-# ---------- synthesis helper ----------
+# ---------- synthesis helpers ----------
 
-async def _synthesize_bytes(
+async def _resolve_voice(voice_name: Optional[str]) -> tuple[
+    Optional[str], Optional[str], Optional[str]
+]:
+    """Resolve ``voice_name`` into (reference_wav_path, prompt_text, elevenlabs_voice_id).
+
+    Returns ``(None, None, None)`` for design mode.
+    """
+    if not voice_name:
+        return None, None, None
+    assert _repo is not None
+    v = await _repo.get(voice_name)
+    if v is None:
+        raise HTTPException(404, f"voice '{voice_name}' not found")
+    if not v.abs_path.exists():
+        raise HTTPException(500, f"voice file missing on disk: {v.abs_path}")
+    return str(v.abs_path), v.prompt_text, v.elevenlabs_voice_id
+
+
+async def _synthesize_wav(
     *,
     text: str,
     voice_name: Optional[str],
     cfg: float,
     steps: int,
-    normalize: bool,
-    denoise: bool,
-) -> bytes:
-    assert _synth is not None and _repo is not None
-
-    ref_path: Optional[str] = None
-    prompt_text: Optional[str] = None
-    if voice_name:
-        v = await _repo.get(voice_name)
-        if v is None:
-            raise HTTPException(404, f"voice '{voice_name}' not found")
-        if not v.abs_path.exists():
-            raise HTTPException(500, f"voice file missing on disk: {v.abs_path}")
-        ref_path = str(v.abs_path)
-        prompt_text = v.prompt_text
-
-    wav, sr = _synth.generate(
+) -> SynthResult:
+    assert _engine is not None
+    ref_path, prompt_text, eleven_voice_id = await _resolve_voice(voice_name)
+    return await _engine.generate(
         text=text,
         reference_wav_path=ref_path,
-        prompt_wav_path=ref_path if prompt_text else None,
         prompt_text=prompt_text,
-        cfg_value=cfg,
-        inference_timesteps=steps,
-        normalize=normalize,
-        denoise=denoise,
+        voice_id=eleven_voice_id,
+        cfg=cfg,
+        steps=steps,
     )
 
-    buf = io.BytesIO()
-    sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
-    buf.seek(0)
-    return buf.read()
+
+def _duration_from_wav(wav_bytes: bytes) -> Optional[float]:
+    try:
+        info = sf.info(io.BytesIO(wav_bytes))
+        return float(info.duration)
+    except Exception:
+        return None
+
+
+async def _synthesize_and_cache(
+    *, text: str, voice_name: Optional[str], cfg: float, steps: int,
+    request: Optional[Request] = None,
+) -> SynthesizeUrlResponse:
+    """Run the fallback chain, transcode to OGG/Opus, cache, return a URL."""
+    result = await _synthesize_wav(
+        text=text, voice_name=voice_name, cfg=cfg, steps=steps,
+    )
+    # Transcode off the event loop; ffmpeg blocks.
+    ogg_bytes = await asyncio.to_thread(
+        audio_codec.to_ogg_opus, result.wav_bytes, input_format="wav",
+    )
+    cache_id = audio_cache.put(ogg_bytes)
+    duration = _duration_from_wav(result.wav_bytes)
+
+    public_base = os.environ.get("VOX_PUBLIC_BASE_URL")
+    if public_base:
+        audio_url = f"{public_base.rstrip('/')}/audio/{cache_id}.ogg"
+    elif request is not None:
+        audio_url = str(request.url_for("get_audio", cache_id=cache_id))
+    else:
+        # MCP callers go through here. Fall back to the well-known public URL.
+        audio_url = f"https://vox.delo.sh/audio/{cache_id}.ogg"
+
+    return SynthesizeUrlResponse(
+        audio_url=audio_url,
+        engine=result.engine,
+        duration_s=duration,
+        bytes=len(ogg_bytes),
+    )
 
 
 # ---------- FastMCP (defined first so we can nest its lifespan) ----------
 
 mcp = FastMCP(name="vox", instructions=(
-    "Text-to-speech tools backed by VoxCPM2. Use `speak` to synthesize audio "
-    "in a named voice. Use `list_voices` to discover what voices are available."
+    "Text-to-speech tools backed by VoxCPM2 with ElevenLabs fallback. "
+    "Use `speak_url` when the audio will be consumed by another service "
+    "(Telegram sendVoice, browser, Home Assistant) — returns a fetchable "
+    "OGG/Opus URL. Use `speak` only when you need the raw bytes inline. "
+    "Use `list_voices_tool` to discover saved voice profiles."
 ))
 mcp_app = mcp.http_app(path="/")  # mount at root of the sub-app so /mcp hits it
 
@@ -131,40 +199,102 @@ mcp_app = mcp.http_app(path="/")  # mount at root of the sub-app so /mcp hits it
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _synth, _repo
+    global _synth, _repo, _engine, _sweep_task
     dsn = os.environ["VOX_DATABASE_URL"]
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    audio_cache.ensure_dir()
 
     _repo = await VoiceRepo.connect(dsn)
     _synth = Synth()
     _synth.load()
-    logger.info("vox-tts ready: voices_dir=%s ref_cap=%.0fs",
-                VOICES_DIR, REF_AUDIO_MAX_SECONDS)
+
+    # Engine order: VoxCPM2 primary, ElevenLabs fallback. ElevenLabs self-
+    # disables when ELEVENLABS_API_KEY is unset, so no config flag needed to
+    # run without fallback during local dev.
+    _engine = EngineOrchestrator([VoxCPMEngine(_synth), ElevenLabsEngine()])
+
+    _sweep_task = asyncio.create_task(audio_cache.sweep_loop())
+
+    logger.info(
+        "vox-tts ready: voices_dir=%s audio_cache=%s ref_cap=%.0fs",
+        VOICES_DIR, audio_cache.AUDIO_CACHE_DIR, REF_AUDIO_MAX_SECONDS,
+    )
     try:
         async with mcp_app.lifespan(app):
             yield
     finally:
+        if _sweep_task:
+            _sweep_task.cancel()
         await _repo.close()
 
 
 # ---------- FastAPI ----------
 
-app = FastAPI(title="vox-tts", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="vox-tts", version="0.2.0", lifespan=lifespan)
 
 
 @app.get("/healthz")
 async def healthz():
-    return {"status": "ok", "model_loaded": _synth is not None and _synth._model is not None}
+    assert _engine is not None
+    return {
+        "status": "ok",
+        "model_loaded": _synth is not None and _synth._model is not None,
+        "engines": [
+            {"name": e.name, "available": e.available()} for e in _engine._engines
+        ],
+    }
 
 
 @app.post("/synthesize", responses={200: {"content": {"audio/wav": {}}}})
 async def synthesize(req: SynthesizeRequest) -> Response:
-    wav_bytes = await _synthesize_bytes(
-        text=req.text, voice_name=req.voice,
-        cfg=req.cfg, steps=req.steps,
-        normalize=req.normalize, denoise=req.denoise,
+    """Legacy single-engine WAV synthesis. No fallback, no cache."""
+    assert _synth is not None and _repo is not None
+    ref_path, prompt_text, _ = await _resolve_voice(req.voice)
+
+    wav, sr = _synth.generate(
+        text=req.text,
+        reference_wav_path=ref_path,
+        prompt_wav_path=ref_path if prompt_text else None,
+        prompt_text=prompt_text,
+        cfg_value=req.cfg,
+        inference_timesteps=req.steps,
+        normalize=req.normalize,
+        denoise=req.denoise,
     )
-    return Response(content=wav_bytes, media_type="audio/wav")
+    buf = io.BytesIO()
+    sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
+    return Response(content=buf.getvalue(), media_type="audio/wav")
+
+
+@app.post("/synthesize-url", response_model=SynthesizeUrlResponse)
+async def synthesize_url(req: SynthesizeRequest, request: Request) -> SynthesizeUrlResponse:
+    """Synthesize with engine fallback, transcode to OGG/Opus, return a URL.
+
+    Consumers like Telegram's sendVoice fetch the URL directly from our
+    /audio/<id>.ogg route. The cache entry expires per ``VOX_AUDIO_TTL_SECONDS``.
+    """
+    try:
+        return await _synthesize_and_cache(
+            text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
+            request=request,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("synthesize_url failed")
+        raise HTTPException(500, f"synthesis failed: {exc}") from exc
+
+
+@app.get("/audio/{cache_id}.ogg", name="get_audio")
+async def get_audio(cache_id: str) -> FileResponse:
+    """Serve a cached OGG/Opus blob. Called by Telegram when sendVoice fires."""
+    path = audio_cache.path_for(cache_id)
+    if path is None:
+        raise HTTPException(404, "audio expired or not found")
+    # inline so Telegram's probe works; Cache-Control to keep CDN honest
+    return FileResponse(
+        path,
+        media_type="audio/ogg",
+        headers={"Cache-Control": "public, max-age=600"},
+    )
 
 
 @app.get("/voices", response_model=list[VoiceOut])
@@ -247,6 +377,9 @@ async def speak(
 ) -> dict:
     """Synthesize speech and return the audio as base64-encoded WAV bytes.
 
+    Prefer ``speak_url`` for most delivery surfaces; this tool only exists for
+    callers that must have the raw bytes inline.
+
     Args:
         text: What to say.
         voice: Name of a saved voice profile. Omit for voice-design mode.
@@ -254,16 +387,41 @@ async def speak(
         steps: Diffusion inference steps (higher = better quality, slower).
     """
     import base64
-    wav_bytes = await _synthesize_bytes(
-        text=text, voice_name=voice,
-        cfg=cfg, steps=steps,
-        normalize=False, denoise=False,
+    result = await _synthesize_wav(
+        text=text, voice_name=voice, cfg=cfg, steps=steps,
     )
     return {
-        "audio_wav_b64": base64.b64encode(wav_bytes).decode("ascii"),
+        "audio_wav_b64": base64.b64encode(result.wav_bytes).decode("ascii"),
         "voice": voice,
-        "bytes": len(wav_bytes),
+        "engine": result.engine,
+        "bytes": len(result.wav_bytes),
     }
+
+
+@mcp.tool
+async def speak_url(
+    text: str,
+    voice: Optional[str] = None,
+    cfg: float = 2.0,
+    steps: int = 10,
+) -> dict:
+    """Synthesize speech and return a short-lived OGG/Opus URL.
+
+    The returned URL is Telegram-ready: pass it to the ``telegram`` channel's
+    ``send`` action with ``asVoice: true`` and Telegram's servers fetch
+    directly. Also works for browser <audio>, Home Assistant media_player,
+    Discord, etc. Entries expire after VOX_AUDIO_TTL_SECONDS (default 1h).
+
+    Args:
+        text: What to say.
+        voice: Name of a saved voice profile. Omit for voice-design mode.
+        cfg: Classifier-free guidance scale (1.0-5.0).
+        steps: Diffusion inference steps (higher = better quality, slower).
+    """
+    resp = await _synthesize_and_cache(
+        text=text, voice_name=voice, cfg=cfg, steps=steps,
+    )
+    return resp.model_dump()
 
 
 @mcp.tool
@@ -276,12 +434,13 @@ async def list_voices_tool() -> list[dict]:
             "display_name": v.display_name,
             "duration_s": v.duration_s,
             "tags": v.tags,
+            "elevenlabs_voice_id": v.elevenlabs_voice_id,
         }
         for v in await _repo.list()
     ]
 
 
 # Mount FastMCP's streamable HTTP app at /mcp so clients can:
-#   hermes mcp add vox --url https://vox.delo.sh/mcp
+#   hermes mcp add vox --url https://vox.delo.sh/mcp/
 # path="/" above means the MCP endpoint sits at the mount root, not /mcp/mcp.
 app.mount("/mcp", mcp_app)
