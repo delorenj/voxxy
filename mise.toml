@@ -69,3 +69,23 @@ done
 [tasks.build]
 description = "Rebuild the image without starting (use after Dockerfile / pyproject changes)"
 run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose build vox"
+
+[tasks.install-cli]
+description = "Symlink scripts/vox-speak into ~/.local/bin for shell-wide use"
+run = '''
+set -eu
+src="$(pwd)/scripts/vox-speak"
+dst="$HOME/.local/bin/vox-speak"
+if [ ! -x "$src" ]; then
+  echo "missing or non-executable: $src" >&2
+  exit 1
+fi
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$src" "$dst"
+echo "linked $dst -> $src"
+if command -v vox-speak >/dev/null 2>&1; then
+  echo "on PATH: $(command -v vox-speak)"
+else
+  echo "warning: ~/.local/bin is not on PATH; add it to your shell rc"
+fi
+'''

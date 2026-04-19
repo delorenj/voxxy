@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# vox-speak: synthesize speech via the vox service and play it.
+#
+# Usage:
+#   vox-speak "hello world"                   # play through local paplay
+#   vox-speak -v rick "hello world"           # pick a voice (default: rick)
+#   echo "hello" | vox-speak                  # text from stdin
+#   vox-speak --raw "hi" > out.wav            # force WAV to stdout
+#   ssh big-chungus vox-speak --raw "hi" | paplay
+#                                             # remote synth, local playback
+#
+# Env:
+#   VOX_VOICE   default voice name                  (default: rick)
+#   VOX_URL     base URL of the vox service         (default: https://vox.delo.sh)
+#   VOX_PLAYER  override the local audio player     (default: paplay)
+
+set -euo pipefail
+
+VOICE="${VOX_VOICE:-rick}"
+VOX_URL="${VOX_URL:-https://vox.delo.sh}"
+PLAYER="${VOX_PLAYER:-paplay}"
+MODE="auto"   # auto | play | raw
+
+die() { printf 'vox-speak: %s\n' "$1" >&2; exit "${2:-1}"; }
+
+usage() {
+  sed -n '2,16p' "$0" | sed 's/^# \?//'
+  exit "${1:-0}"
+}
+
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -v|--voice)  [[ $# -ge 2 ]] || die "--voice needs a value" 2; VOICE="$2"; shift 2 ;;
+    -u|--url)    [[ $# -ge 2 ]] || die "--url needs a value" 2;   VOX_URL="$2"; shift 2 ;;
+    -r|--raw)    MODE="raw"; shift ;;
+    -p|--play)   MODE="play"; shift ;;
+    -h|--help)   usage 0 ;;
+    --)          shift; args+=("$@"); break ;;
+    -*)          die "unknown flag: $1" 2 ;;
+    *)           args+=("$1"); shift ;;
+  esac
+done
+
+if ((${#args[@]})); then
+  text="${args[*]}"
+elif [[ ! -t 0 ]]; then
+  text="$(cat)"
+else
+  die "no text (pass as args or via stdin; use -h for help)" 2
+fi
+
+# Strip surrounding whitespace; reject empty.
+text="${text#"${text%%[![:space:]]*}"}"
+text="${text%"${text##*[![:space:]]}"}"
+[[ -n "$text" ]] || die "empty text" 2
+
+for bin in curl jq; do
+  command -v "$bin" >/dev/null 2>&1 || die "missing dependency: $bin" 127
+done
+
+payload="$(jq -nc --arg t "$text" --arg v "$VOICE" '{text:$t, voice:$v}')"
+
+fetch() {
+  # --fail-with-body: non-2xx emits body to stderr and exits non-zero.
+  curl -sS --fail-with-body -X POST "$VOX_URL/synthesize" \
+       -H 'content-type: application/json' \
+       --data-raw "$payload"
+}
+
+# Default: play locally if stdout is a TTY (user watching), else emit raw WAV
+# so the bytes can be piped (including back across SSH to a local paplay).
+if [[ "$MODE" == "auto" ]]; then
+  if [[ -t 1 ]]; then MODE="play"; else MODE="raw"; fi
+fi
+
+case "$MODE" in
+  play)
+    command -v "$PLAYER" >/dev/null 2>&1 \
+      || die "$PLAYER not found; use --raw and pipe the WAV yourself" 127
+    fetch | "$PLAYER"
+    ;;
+  raw)
+    fetch
+    ;;
+esac

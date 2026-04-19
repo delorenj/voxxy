@@ -22,6 +22,7 @@ One service, three transports, every delivery surface:
 ├── voices/                 WAV blobs (bind-mounted into container)
 ├── audio-cache/            OGG blobs served at /audio/<id>.ogg (TTL'd, gitignored)
 ├── node-red-contrib-vox/   custom Node-RED node
+├── scripts/                shell CLIs (vox-speak)
 ├── migrations/             numbered SQL migrations applied against host postgres
 ├── init.sql                fresh-install schema for host postgres db `vox`
 ├── Dockerfile              nvidia/cuda base, uv deps, ffmpeg
@@ -89,6 +90,31 @@ curl https://vox.delo.sh/healthz
 #    "engines":[{"name":"voxcpm","available":true},
 #               {"name":"elevenlabs","available":true}]}
 ```
+
+### CLI (`vox-speak`)
+
+A thin wrapper over `POST /synthesize` for interactive use and SSH playback.
+Reads text from args or stdin, plays through the local audio sink by default,
+or emits raw WAV on stdout so it can be piped across an SSH link.
+
+```bash
+# Install (symlinks scripts/vox-speak into ~/.local/bin)
+mise run install-cli
+
+# Local playback (default voice: rick)
+vox-speak "systems nominal"
+vox-speak -v morgan "it's morgan"
+echo "from stdin" | vox-speak
+
+# Save to a file
+vox-speak --raw "archive me" > out.wav
+
+# Remote synth, local speakers — `--raw` forces WAV to stdout
+ssh big-chungus vox-speak --raw "deploy finished" | paplay
+```
+
+Env overrides: `VOX_VOICE` (default voice), `VOX_URL` (service base URL,
+defaults to `https://vox.delo.sh`), `VOX_PLAYER` (default `paplay`).
 
 ### Telegram voice note (via Bot API)
 
