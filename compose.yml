@@ -1,4 +1,7 @@
 services:
+  # voxxy-core — CPU-only transport + routing. Synthesis runs in sidecar engine
+  # containers (see compose.engines.yml). Service name stays `vox` so existing
+  # monitoring, `docker logs -f vox`, and `mise run logs` keep working.
   vox:
     build: .
     container_name: vox
@@ -10,43 +13,32 @@ services:
       VOX_AUDIO_CACHE_DIR: /data/audio-cache
       VOX_AUDIO_TTL_SECONDS: "3600"
       VOX_PUBLIC_BASE_URL: https://vox.delo.sh
-      VOX_OPTIMIZE: "1"
       VOX_REF_AUDIO_MAX_SECONDS: "30"
-      # ElevenLabs fallback. Omit ELEVENLABS_API_KEY to disable the fallback
-      # engine entirely (orchestrator skips unavailable engines silently).
+      # Engine registry: ordered list of name=url pairs. Core tries them in
+      # order; first success wins. ElevenLabs is always appended in-process
+      # and self-disables without ELEVENLABS_API_KEY. Default stack assumes the
+      # voxcpm sidecar from compose.engines.yml is up.
+      VOX_ENGINES: ${VOX_ENGINES:-voxcpm=http://voxxy-engine-voxcpm:8000}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       ELEVENLABS_DEFAULT_VOICE: ${ELEVENLABS_DEFAULT_VOICE:-pNInz6obpgDQGcFmaJgB}
-      HF_HOME: /cache/huggingface
-      # expose the driver, not a hard-coded version, to match nvidia-smi
     volumes:
       # Voice profile WAVs (seeded + user-uploaded). Bind-mounted so you can
-      # scp/rsync new voices in without the API.
+      # scp/rsync new voices in without the API. Core reads them to ship
+      # reference audio inline in /v1/synthesize requests to engines.
       - ./voices:/data/voices
       # Short-lived OGG/Opus blobs served via /audio/<id>.ogg and fetched by
       # Telegram, browsers, Home Assistant, etc. Swept on a timer.
       - ./audio-cache:/data/audio-cache
-      # Reuse host huggingface cache so we don't re-download the 4.58 GB
-      # VoxCPM2 weights on every image rebuild.
-      - /home/delorenj/.cache/huggingface:/cache/huggingface
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:
       - proxy
-    # GPU passthrough (requires nvidia-container-runtime as default docker runtime
-    # OR explicit `--runtime=nvidia` in /etc/docker/daemon.json).
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 120s
+      start_period: 30s
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.vox.rule=Host(`vox.delo.sh`)"

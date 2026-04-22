@@ -3,16 +3,13 @@
 Engines are pluggable. Today the shipped set is:
 
 - ``RemoteEngineClient``: HTTP/JSON client that speaks the ``/v1/synthesize``
-  contract defined in :mod:`app.engine_contract`. Used for every local engine
-  (voxcpm, vibevoice, ...) which run as separate containers on the compose
-  network. See docs/specs/engine-decoupling.md.
+  contract defined in :mod:`app.engine_contract`. One instance per entry in
+  ``VOX_ENGINES`` (``name=url,name=url``). The local VoxCPM2 engine now runs
+  as a sidecar container and is accessed via ``RemoteEngineClient``; there is
+  no longer an in-process model loader in this package.
 - ``ElevenLabsEngine``: remote ElevenLabs TTS. Stays in-core because it's
   already a remote call; wrapping it in another container would add a hop for
-  nothing. Terminal fallback when all local engines fail.
-- ``VoxCPMEngine``: legacy in-process wrapper. Kept during Phase 1 of the
-  engine-decoupling migration so the lifespan can still boot against the old
-  topology while the new client is exercised. Removed at the Phase 4
-  checkpoint (T4.5).
+  nothing. Terminal fallback when all remote engines fail.
 
 :class:`EngineOrchestrator` tries engines in order; first success wins. The
 request shape is the same for every engine so a new one is just another
@@ -38,7 +35,6 @@ from app.engine_contract import (
     EngineSynthesizeRequest,
     EngineSynthesizeResponse,
 )
-from app.synth import Synth
 
 logger = logging.getLogger(__name__)
 
@@ -74,55 +70,6 @@ class SynthEngine(Protocol):
         cfg: float = 2.0,
         steps: int = 10,
     ) -> SynthResult: ...
-
-
-class VoxCPMEngine:
-    """Local VoxCPM2 via the existing Synth wrapper.
-
-    Calls the blocking generate() directly on the event loop thread. Offloading
-    to ``asyncio.to_thread`` was tempting (keeps other requests responsive
-    during the ~2s synth) but breaks torch.compile / cudagraph_trees: the
-    compiled graph stores state in thread-local storage initialized on the
-    main thread, and calling from a worker thread hits an AssertionError in
-    torch._inductor.cudagraph_trees.get_obj. For this single-concurrency
-    GPU-bound service, blocking the loop is the right tradeoff. If concurrency
-    ever matters more than inference speed, flip VOX_OPTIMIZE=0 and revisit.
-    """
-
-    name = "voxcpm"
-
-    def __init__(self, synth: Synth) -> None:
-        self._synth = synth
-
-    def available(self) -> bool:
-        # Synth is always considered available once loaded; errors surface at
-        # generate() time. The orchestrator handles those.
-        return self._synth is not None and self._synth._model is not None
-
-    async def generate(
-        self,
-        *,
-        text: str,
-        reference_wav_path: Optional[str] = None,
-        prompt_text: Optional[str] = None,
-        voice_id: Optional[str] = None,
-        cfg: float = 2.0,
-        steps: int = 10,
-    ) -> SynthResult:
-        # voice_id is the ElevenLabs-side concept; local engine ignores it.
-        wav, sr = self._synth.generate(
-            text=text,
-            reference_wav_path=reference_wav_path,
-            prompt_wav_path=reference_wav_path if prompt_text else None,
-            prompt_text=prompt_text,
-            cfg_value=cfg,
-            inference_timesteps=steps,
-            normalize=False,
-            denoise=False,
-        )
-        buf = io.BytesIO()
-        sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
-        return SynthResult(wav_bytes=buf.getvalue(), sample_rate=sr, engine=self.name)
 
 
 # ElevenLabs "eleven_turbo_v2_5" is the current cheap+fast model. PCM output

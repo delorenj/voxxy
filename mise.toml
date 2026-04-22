@@ -1,15 +1,24 @@
 # mise tasks for vox-tts. Wraps docker compose invocations with `op run` so
 # secrets stay in 1password instead of on disk.
 #
+# Topology (see docs/specs/engine-decoupling.md):
+#   compose.yml          — voxxy-core (CPU-only transport/routing)
+#   compose.engines.yml  — GPU-bound engine sidecars (voxcpm, vibevoice, ...)
+#
 # Usage:
-#   mise run up           # build + start the service with secrets injected
-#   mise run down         # stop + remove the container
-#   mise run logs         # tail container logs
-#   mise run restart      # recreate container (picks up code changes)
-#   mise run health       # curl /healthz and pretty-print engine status
-#   mise run smoke        # end-to-end synthesize + fetch + probe
-#   mise run migrate      # apply the latest SQL migration against host postgres
-#   mise tasks            # list every task with descriptions
+#   mise run up              # full stack (core + engines)
+#   mise run up:core-only    # just core; engines managed externally
+#   mise run up:engines      # just engines (useful for partial restart)
+#   mise run down            # stop + remove all containers
+#   mise run logs            # tail core logs
+#   mise run logs:voxcpm     # tail voxcpm engine logs
+#   mise run restart         # recreate core (picks up app/ code changes)
+#   mise run health          # curl /healthz and pretty-print engine status
+#   mise run smoke           # end-to-end synthesize + fetch + probe
+#   mise run migrate         # apply SQL migrations against host postgres
+#   mise run build           # rebuild all images
+#   mise run build:voxcpm    # rebuild just the voxcpm engine
+#   mise tasks               # list every task with descriptions
 
 [tools]
 # Pin nothing here; defer to the host. This file is task-focused, not env-focused.
@@ -18,22 +27,37 @@
 # Path mise resolves against when running `op run`. Kept in-repo so it travels
 # with the code and is self-explanatory.
 VOX_OP_ENV_FILE = ".env.template"
+# Compose file list. Engines are an overlay so `up:core-only` can drop them.
+VOX_COMPOSE_FULL = "-f compose.yml -f compose.engines.yml"
+VOX_COMPOSE_CORE = "-f compose.yml"
 
 [tasks.up]
-description = "Build + start vox with secrets injected from 1password"
-run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose up -d --build"
+description = "Build + start the full stack (core + engines) with secrets from 1password"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} up -d --build"
+
+[tasks."up:core-only"]
+description = "Start only voxxy-core (engines managed externally)"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_CORE}} up -d --build"
+
+[tasks."up:engines"]
+description = "Start only the engine sidecars (core managed externally)"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} up -d --build voxxy-engine-voxcpm"
 
 [tasks.down]
-description = "Stop and remove the vox container"
-run = "docker compose down"
+description = "Stop and remove all containers in the stack"
+run = "docker compose {{env.VOX_COMPOSE_FULL}} down"
 
 [tasks.restart]
-description = "Recreate vox (picks up app/ code changes without a full rebuild)"
-run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose up -d --build vox"
+description = "Recreate voxxy-core (picks up app/ code changes)"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} up -d --build vox"
 
 [tasks.logs]
-description = "Tail vox container logs"
+description = "Tail voxxy-core logs"
 run = "docker logs -f vox"
+
+[tasks."logs:voxcpm"]
+description = "Tail voxxy-engine-voxcpm logs"
+run = "docker logs -f voxxy-engine-voxcpm"
 
 [tasks.health]
 description = "Hit /healthz and pretty-print engine availability"
@@ -67,8 +91,16 @@ done
 '''
 
 [tasks.build]
-description = "Rebuild the image without starting (use after Dockerfile / pyproject changes)"
-run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose build vox"
+description = "Rebuild all images without starting"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} build"
+
+[tasks."build:core"]
+description = "Rebuild just voxxy-core"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_CORE}} build vox"
+
+[tasks."build:voxcpm"]
+description = "Rebuild just the voxcpm engine image"
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} build voxxy-engine-voxcpm"
 
 [tasks.install-cli]
 description = "Symlink scripts/vox-speak into ~/.local/bin for shell-wide use"

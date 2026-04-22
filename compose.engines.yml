@@ -1,0 +1,56 @@
+# compose.engines.yml — GPU-bound engine sidecars.
+#
+# Overlay on top of compose.yml. Each engine runs as its own container so
+# dependency trees (voxcpm vs transformers+VibeVoice) don't collide and
+# VRAM allocation is per-engine rather than shared in a single process.
+#
+# Engines are reachable internally via docker-compose DNS names
+# (voxxy-engine-voxcpm, voxxy-engine-vibevoice, ...). Core picks them up via
+# the VOX_ENGINES env var (see compose.yml).
+#
+# Usage:
+#   docker compose -f compose.yml -f compose.engines.yml up -d --build
+# Or via mise:
+#   mise run up            # full stack
+#   mise run up:core-only  # core only, expects engines to be externally managed
+#   mise run up:engines    # engines only
+
+services:
+  voxxy-engine-voxcpm:
+    build: ./engines/voxcpm
+    container_name: voxxy-engine-voxcpm
+    restart: unless-stopped
+    environment:
+      HF_HOME: /cache/huggingface
+      # Memory-containment knobs for shared-GPU hosts. expandable_segments
+      # keeps peak usage predictable; VOX_REF_AUDIO_MAX_SECONDS gates the
+      # reference clip trim inside Synth. Match core for symmetry so a voice
+      # that works on core passes the same sanity check here.
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      VOX_REF_AUDIO_MAX_SECONDS: "30"
+      # Opt-in torch.compile. Faster RTF, higher peak VRAM; enable only if the
+      # GPU is dedicated to this engine.
+      VOX_OPTIMIZE: ${VOX_OPTIMIZE:-0}
+    volumes:
+      # Reuse host huggingface cache so we don't re-download the 4.58 GB
+      # VoxCPM2 weights on every image rebuild.
+      - /home/delorenj/.cache/huggingface:/cache/huggingface
+    networks:
+      # Share the proxy network so core can resolve us by service name. No
+      # Traefik labels: this endpoint is internal, never externally routed.
+      - proxy
+    # GPU passthrough (requires nvidia-container-runtime as default docker
+    # runtime OR explicit `--runtime=nvidia` in /etc/docker/daemon.json).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Dockerfile already declares HEALTHCHECK; compose inherits it. Explicit
+    # definition here would override, so we leave it alone.
+
+networks:
+  proxy:
+    external: true

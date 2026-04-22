@@ -1,6 +1,6 @@
 """vox-tts: universal TTS service.
 
-- HTTP API: POST /synthesize → audio/wav  (legacy; single-engine, no fallback)
+- HTTP API: POST /synthesize → audio/wav  (engine chain, returns winning bytes)
 - HTTP API: POST /synthesize-url → JSON   (engine fallback + URL return)
 - Audio cache: GET /audio/{id}.ogg        (Telegram-ready OGG/Opus)
 - MCP at /mcp/ (streamable HTTP) for Hermes/OpenClaw/Claude Code
@@ -12,9 +12,8 @@ Environment:
   VOX_VOICES_DIR       directory holding voice WAVs (default: /data/voices)
   VOX_AUDIO_CACHE_DIR  directory for cached OGG blobs (default: /data/audio-cache)
   VOX_AUDIO_TTL_SECONDS  cache lifetime (default: 3600)
-  VOX_OPTIMIZE=1       enable torch.compile (more VRAM, faster RTF)
+  VOX_ENGINES          comma-separated name=url pairs for remote engine sidecars
   VOX_REF_AUDIO_MAX_SECONDS  max reference audio length (default 30)
-  VOX_MAX_LEN          max generation token length (default 2048)
   ELEVENLABS_API_KEY   enables the ElevenLabs fallback engine (optional)
   ELEVENLABS_DEFAULT_VOICE  default ElevenLabs voice id (default: Adam)
 """
@@ -39,8 +38,7 @@ from pydantic import BaseModel, Field
 
 from app import audio as audio_codec
 from app import cache as audio_cache
-from app.engines import ElevenLabsEngine, EngineOrchestrator, SynthResult, VoxCPMEngine
-from app.synth import REF_AUDIO_MAX_SECONDS, Synth
+from app.engines import ElevenLabsEngine, EngineOrchestrator, RemoteEngineClient, SynthResult
 from app.voices import VOICES_DIR, Voice, VoiceRepo
 
 logging.basicConfig(
@@ -49,11 +47,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vox")
 
+REF_AUDIO_MAX_SECONDS = float(os.environ.get("VOX_REF_AUDIO_MAX_SECONDS", "30"))
+
 # ---------- globals populated in lifespan ----------
-_synth: Synth | None = None
 _repo: VoiceRepo | None = None
 _engine: EngineOrchestrator | None = None
 _sweep_task: asyncio.Task | None = None
+
+
+# ---------- engine chain builder ----------
+
+def _build_engine_chain() -> list:
+    """Parse VOX_ENGINES env (format 'name=url,name=url'), append ElevenLabs.
+
+    ElevenLabsEngine.available() self-disables without ELEVENLABS_API_KEY so
+    appending it unconditionally is safe and keeps the registry env-only.
+    """
+    spec = os.environ.get("VOX_ENGINES", "").strip()
+    remotes: list = []
+    for entry in spec.split(","):
+        entry = entry.strip()
+        if not entry or "=" not in entry:
+            continue
+        name, url = entry.split("=", 1)
+        remotes.append(RemoteEngineClient(name.strip(), url.strip()))
+    return remotes + [ElevenLabsEngine()]
 
 
 # ---------- API models ----------
@@ -199,25 +217,20 @@ mcp_app = mcp.http_app(path="/")  # mount at root of the sub-app so /mcp hits it
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _synth, _repo, _engine, _sweep_task
+    global _repo, _engine, _sweep_task
     dsn = os.environ["VOX_DATABASE_URL"]
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
     audio_cache.ensure_dir()
 
     _repo = await VoiceRepo.connect(dsn)
-    _synth = Synth()
-    _synth.load()
-
-    # Engine order: VoxCPM2 primary, ElevenLabs fallback. ElevenLabs self-
-    # disables when ELEVENLABS_API_KEY is unset, so no config flag needed to
-    # run without fallback during local dev.
-    _engine = EngineOrchestrator([VoxCPMEngine(_synth), ElevenLabsEngine()])
+    _engine = EngineOrchestrator(_build_engine_chain())
 
     _sweep_task = asyncio.create_task(audio_cache.sweep_loop())
 
     logger.info(
-        "vox-tts ready: voices_dir=%s audio_cache=%s ref_cap=%.0fs",
+        "vox-tts core ready: voices_dir=%s audio_cache=%s ref_cap=%.0fs engines=%s",
         VOICES_DIR, audio_cache.AUDIO_CACHE_DIR, REF_AUDIO_MAX_SECONDS,
+        [e.name for e in _engine._engines],
     )
     try:
         async with mcp_app.lifespan(app):
@@ -236,34 +249,89 @@ app = FastAPI(title="vox-tts", version="0.2.0", lifespan=lifespan)
 @app.get("/healthz")
 async def healthz():
     assert _engine is not None
-    return {
-        "status": "ok",
-        "model_loaded": _synth is not None and _synth._model is not None,
-        "engines": [
-            {"name": e.name, "available": e.available()} for e in _engine._engines
-        ],
-    }
+    engines = []
+    for e in _engine._engines:
+        ready = e.available()
+        # For RemoteEngineClient, trigger an actual probe so stale cache
+        # doesn't lie. ElevenLabsEngine.available() is instant.
+        if hasattr(e, "refresh_health"):
+            try:
+                ready = await e.refresh_health()
+            except Exception:
+                ready = False
+        engines.append({"name": e.name, "ready": ready})
+    overall = any(e["ready"] for e in engines)
+    return {"status": "ok" if overall else "degraded", "engines": engines}
+
+
+# ---------- client installer ----------
+#
+# The service hosts its own CLI distribution so new workstations can bootstrap
+# with one line: `curl -fsSL https://vox.delo.sh/install.sh | sh`. Single source
+# of truth (scripts/vox-speak in the repo), TLS-fronted via Traefik, no separate
+# hosting. `__BASE__` is substituted at request time so the installer pulls from
+# whatever origin served it (handy for local dev + prod on the same template).
+
+_SCRIPT_PATH = Path(__file__).parent.parent / "scripts" / "vox-speak"
+
+_INSTALLER_TEMPLATE = """#!/bin/sh
+# vox-speak bootstrap installer. Served by __BASE__.
+set -eu
+
+DEST="${VOX_INSTALL_DIR:-$HOME/.local/bin}"
+SRC="${VOX_BOOTSTRAP_URL:-__BASE__/bin/vox-speak}"
+
+mkdir -p "$DEST"
+# Download to .tmp then rename so a partial write never becomes executable.
+curl -fsSL "$SRC" -o "$DEST/vox-speak.tmp"
+chmod +x "$DEST/vox-speak.tmp"
+mv "$DEST/vox-speak.tmp" "$DEST/vox-speak"
+
+echo "installed: $DEST/vox-speak"
+
+case ":$PATH:" in
+  *":$DEST:"*)
+    echo "on PATH; try: vox-speak 'hello world'"
+    ;;
+  *)
+    echo "warning: $DEST is not on PATH"
+    echo "add this to ~/.zshenv (not ~/.zshrc; non-interactive SSH skips .zshrc):"
+    echo "  path=(~/.local/bin \\$path)"
+    ;;
+esac
+"""
+
+
+@app.get("/bin/vox-speak")
+async def bin_vox_speak() -> FileResponse:
+    """Serve the raw vox-speak shell script."""
+    if not _SCRIPT_PATH.is_file():
+        raise HTTPException(404, "vox-speak script not bundled in this image")
+    return FileResponse(_SCRIPT_PATH, media_type="text/x-shellscript")
+
+
+@app.get("/install.sh")
+async def install_sh(request: Request) -> Response:
+    """Bootstrap installer: `curl -fsSL .../install.sh | sh`."""
+    # Traefik terminates TLS upstream, so request.url.scheme is always "http"
+    # inside the container. Honour X-Forwarded-Proto/Host so the installer
+    # advertises the client-facing URL (https://vox.delo.sh) rather than the
+    # internal one.
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    base = f"{proto}://{host}"
+    body = _INSTALLER_TEMPLATE.replace("__BASE__", base)
+    return Response(content=body, media_type="text/x-shellscript")
 
 
 @app.post("/synthesize", responses={200: {"content": {"audio/wav": {}}}})
 async def synthesize(req: SynthesizeRequest) -> Response:
-    """Legacy single-engine WAV synthesis. No fallback, no cache."""
-    assert _synth is not None and _repo is not None
-    ref_path, prompt_text, _ = await _resolve_voice(req.voice)
-
-    wav, sr = _synth.generate(
-        text=req.text,
-        reference_wav_path=ref_path,
-        prompt_wav_path=ref_path if prompt_text else None,
-        prompt_text=prompt_text,
-        cfg_value=req.cfg,
-        inference_timesteps=req.steps,
-        normalize=req.normalize,
-        denoise=req.denoise,
+    """Raw WAV synthesis. Runs the engine chain, returns the winning engine's bytes."""
+    assert _engine is not None and _repo is not None
+    result = await _synthesize_wav(
+        text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
     )
-    buf = io.BytesIO()
-    sf.write(buf, wav, sr, format="WAV", subtype="PCM_16")
-    return Response(content=buf.getvalue(), media_type="audio/wav")
+    return Response(content=result.wav_bytes, media_type="audio/wav")
 
 
 @app.post("/synthesize-url", response_model=SynthesizeUrlResponse)
