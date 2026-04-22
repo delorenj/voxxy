@@ -51,6 +51,48 @@ services:
     # Dockerfile already declares HEALTHCHECK; compose inherits it. Explicit
     # definition here would override, so we leave it alone.
 
+  voxxy-engine-vibevoice:
+    build: ./engines/vibevoice
+    container_name: voxxy-engine-vibevoice
+    restart: unless-stopped
+    environment:
+      HF_HOME: /cache/huggingface
+      # Memory-containment knobs. expandable_segments keeps peak usage
+      # predictable; VOX_REF_AUDIO_MAX_SECONDS gates the reference clip trim
+      # inside VibeVoiceSynth. VibeVoice performs best with 2-10s clips;
+      # community data suggests quality degrades beyond 10s. A warning is
+      # logged when the incoming clip exceeds 10s.
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      # VibeVoice quality degrades with reference clips longer than ~10s.
+      # Cap lower than voxcpm (which handles 30s fine) so auto-trim kicks in
+      # before passing the clip to the processor.
+      VOX_REF_AUDIO_MAX_SECONDS: "10"
+      # Attention implementation. Default is flash_attention_2 but that
+      # package requires a CUDA toolkit build step and isn't in the image.
+      # sdpa (PyTorch's native scaled-dot-product) works out of the box and
+      # is fast enough for 1.5B inference. Flip to flash_attention_2 if
+      # you rebuild the image with flash-attn pinned in pyproject.toml.
+      VOX_VIBEVOICE_ATTN: ${VOX_VIBEVOICE_ATTN:-sdpa}
+    volumes:
+      # Reuse host huggingface cache so VibeVoice-1.5B weights (~3 GB) survive
+      # image rebuilds without re-downloading.
+      - /home/delorenj/.cache/huggingface:/cache/huggingface
+    networks:
+      # Share the proxy network so core can resolve us by service name. No
+      # Traefik labels: this endpoint is internal, never externally routed.
+      - proxy
+    # GPU passthrough (requires nvidia-container-runtime as default docker
+    # runtime OR explicit `--runtime=nvidia` in /etc/docker/daemon.json).
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    # Dockerfile already declares HEALTHCHECK; compose inherits it. Explicit
+    # definition here would override, so we leave it alone.
+
 networks:
   proxy:
     external: true

@@ -16,9 +16,11 @@ services:
       VOX_REF_AUDIO_MAX_SECONDS: "30"
       # Engine registry: ordered list of name=url pairs. Core tries them in
       # order; first success wins. ElevenLabs is always appended in-process
-      # and self-disables without ELEVENLABS_API_KEY. Default stack assumes the
-      # voxcpm sidecar from compose.engines.yml is up.
-      VOX_ENGINES: ${VOX_ENGINES:-voxcpm=http://voxxy-engine-voxcpm:8000}
+      # and self-disables without ELEVENLABS_API_KEY. Default stack assumes
+      # both sidecars from compose.engines.yml are up; override via the env
+      # to reorder (e.g. make vibevoice primary) or drop engines you aren't
+      # running.
+      VOX_ENGINES: ${VOX_ENGINES:-voxcpm=http://voxxy-engine-voxcpm:8000,vibevoice=http://voxxy-engine-vibevoice:8000}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       ELEVENLABS_DEFAULT_VOICE: ${ELEVENLABS_DEFAULT_VOICE:-pNInz6obpgDQGcFmaJgB}
     volumes:

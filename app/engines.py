@@ -25,7 +25,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 import httpx
 import soundfile as sf
@@ -317,20 +317,36 @@ class EngineOrchestrator:
         *,
         text: str,
         reference_wav_path: Optional[str] = None,
+        reference_resolver: Optional[Callable[[str], Optional[str]]] = None,
         prompt_text: Optional[str] = None,
         voice_id: Optional[str] = None,
         cfg: float = 2.0,
         steps: int = 10,
     ) -> SynthResult:
+        """Run the engine chain; first success wins.
+
+        Args:
+            reference_wav_path: Legacy / no-voice-profile path. Used when
+                ``reference_resolver`` is not supplied.
+            reference_resolver: Per-engine callable ``(engine_name) -> path``.
+                When provided, it takes precedence over ``reference_wav_path``
+                and lets each engine use a different reference clip (e.g. a
+                de-noised version for VibeVoice).
+        """
         last_exc: Optional[BaseException] = None
         for engine in self._engines:
             if not engine.available():
                 logger.info("engine %s skipped (unavailable)", engine.name)
                 continue
+            effective_ref = (
+                reference_resolver(engine.name)
+                if reference_resolver is not None
+                else reference_wav_path
+            )
             try:
                 result = await engine.generate(
                     text=text,
-                    reference_wav_path=reference_wav_path,
+                    reference_wav_path=effective_ref,
                     prompt_text=prompt_text,
                     voice_id=voice_id,
                     cfg=cfg,

@@ -28,7 +28,7 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import soundfile as sf
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
@@ -109,6 +109,8 @@ class VoiceOut(BaseModel):
     prompt_text: Optional[str] = None
     tags: list[str] = []
     elevenlabs_voice_id: Optional[str] = None
+    vibevoice_ref_path: Optional[str] = None
+    vibevoice_speaker_tag: Optional[str] = None
 
     @classmethod
     def from_model(cls, v: Voice) -> "VoiceOut":
@@ -119,17 +121,25 @@ class VoiceOut(BaseModel):
             prompt_text=v.prompt_text,
             tags=v.tags,
             elevenlabs_voice_id=v.elevenlabs_voice_id,
+            vibevoice_ref_path=v.vibevoice_ref_path,
+            vibevoice_speaker_tag=v.vibevoice_speaker_tag,
         )
 
 
 # ---------- synthesis helpers ----------
 
 async def _resolve_voice(voice_name: Optional[str]) -> tuple[
-    Optional[str], Optional[str], Optional[str]
+    Optional[Callable[[str], Optional[str]]], Optional[str], Optional[str]
 ]:
-    """Resolve ``voice_name`` into (reference_wav_path, prompt_text, elevenlabs_voice_id).
+    """Resolve ``voice_name`` into (reference_resolver, prompt_text, elevenlabs_voice_id).
 
-    Returns ``(None, None, None)`` for design mode.
+    ``reference_resolver`` is a callable ``(engine_name) -> wav_path`` so each
+    engine can be pointed at a different reference clip (e.g. a de-noised
+    version for VibeVoice) without plumbing engine identity through the whole
+    call stack. Falls back to ``v.abs_path`` when the engine-specific file
+    doesn't exist on disk.
+
+    Returns ``(None, None, None)`` for voice-design mode (no voice_name).
     """
     if not voice_name:
         return None, None, None
@@ -139,7 +149,12 @@ async def _resolve_voice(voice_name: Optional[str]) -> tuple[
         raise HTTPException(404, f"voice '{voice_name}' not found")
     if not v.abs_path.exists():
         raise HTTPException(500, f"voice file missing on disk: {v.abs_path}")
-    return str(v.abs_path), v.prompt_text, v.elevenlabs_voice_id
+
+    def resolver(engine: str) -> Optional[str]:
+        p = v.ref_path_for(engine)
+        return str(p) if p.exists() else str(v.abs_path)
+
+    return resolver, v.prompt_text, v.elevenlabs_voice_id
 
 
 async def _synthesize_wav(
@@ -150,10 +165,10 @@ async def _synthesize_wav(
     steps: int,
 ) -> SynthResult:
     assert _engine is not None
-    ref_path, prompt_text, eleven_voice_id = await _resolve_voice(voice_name)
+    resolver, prompt_text, eleven_voice_id = await _resolve_voice(voice_name)
     return await _engine.generate(
         text=text,
-        reference_wav_path=ref_path,
+        reference_resolver=resolver,
         prompt_text=prompt_text,
         voice_id=eleven_voice_id,
         cfg=cfg,
@@ -416,6 +431,11 @@ async def create_voice(
         name=name, display_name=display_name, wav_path=dest.name,
         duration_s=duration, source_path=audio.filename,
         prompt_text=prompt_text, tags=tag_list,
+        # Auto-populate per-engine ref for zero-friction onboarding. Operators
+        # can later POST a different clip per engine if they want engine-specific
+        # tuning; the default here means "same clip for everyone".
+        vibevoice_ref_path=dest.name,
+        vibevoice_speaker_tag=None,  # reserved for future multi-speaker
     )
     return VoiceOut.from_model(v)
 

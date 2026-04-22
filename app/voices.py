@@ -27,10 +27,25 @@ class Voice:
     # Optional ElevenLabs voice id for fallback synthesis. When None, the
     # ElevenLabs engine uses its configured default voice.
     elevenlabs_voice_id: Optional[str] = None
+    # Per-engine reference audio path overrides (relative to VOICES_DIR).
+    # NULL/None means "fall back to wav_path" for that engine.
+    vibevoice_ref_path: Optional[str] = None
+    vibevoice_speaker_tag: Optional[str] = None
 
     @property
     def abs_path(self) -> Path:
         return VOICES_DIR / self.wav_path
+
+    def ref_path_for(self, engine: str) -> Path:
+        """Engine-specific reference WAV path on disk.
+
+        Falls back to the default ``wav_path`` when no engine-specific override
+        is configured. Kept on the dataclass so resolution logic stays colocated
+        with the data.
+        """
+        engine_path_map = {"vibevoice": self.vibevoice_ref_path}
+        rel = engine_path_map.get(engine) or self.wav_path
+        return VOICES_DIR / rel
 
 
 class VoiceRepo:
@@ -48,7 +63,7 @@ class VoiceRepo:
     async def get(self, name: str) -> Optional[Voice]:
         row = await self._pool.fetchrow(
             """SELECT name, display_name, wav_path, duration_s, prompt_text, tags,
-                      elevenlabs_voice_id
+                      elevenlabs_voice_id, vibevoice_ref_path, vibevoice_speaker_tag
                FROM voices WHERE name = $1""",
             name,
         )
@@ -57,7 +72,7 @@ class VoiceRepo:
     async def list(self) -> list[Voice]:
         rows = await self._pool.fetch(
             """SELECT name, display_name, wav_path, duration_s, prompt_text, tags,
-                      elevenlabs_voice_id
+                      elevenlabs_voice_id, vibevoice_ref_path, vibevoice_speaker_tag
                FROM voices ORDER BY name"""
         )
         return [_row_to_voice(r) for r in rows]
@@ -72,22 +87,29 @@ class VoiceRepo:
         source_path: Optional[str] = None,
         prompt_text: Optional[str] = None,
         tags: Optional[list[str]] = None,
+        vibevoice_ref_path: Optional[str] = None,
+        vibevoice_speaker_tag: Optional[str] = None,
     ) -> Voice:
         row = await self._pool.fetchrow(
             """INSERT INTO voices (name, display_name, wav_path, source_path,
-                                   duration_s, prompt_text, tags)
-               VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                   duration_s, prompt_text, tags,
+                                   vibevoice_ref_path, vibevoice_speaker_tag)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                ON CONFLICT (name) DO UPDATE SET
-                   display_name = EXCLUDED.display_name,
-                   wav_path     = EXCLUDED.wav_path,
-                   source_path  = EXCLUDED.source_path,
-                   duration_s   = EXCLUDED.duration_s,
-                   prompt_text  = EXCLUDED.prompt_text,
-                   tags         = EXCLUDED.tags,
-                   updated_at   = now()
-               RETURNING name, display_name, wav_path, duration_s, prompt_text, tags""",
+                   display_name          = EXCLUDED.display_name,
+                   wav_path              = EXCLUDED.wav_path,
+                   source_path           = EXCLUDED.source_path,
+                   duration_s            = EXCLUDED.duration_s,
+                   prompt_text           = EXCLUDED.prompt_text,
+                   tags                  = EXCLUDED.tags,
+                   vibevoice_ref_path    = EXCLUDED.vibevoice_ref_path,
+                   vibevoice_speaker_tag = EXCLUDED.vibevoice_speaker_tag,
+                   updated_at            = now()
+               RETURNING name, display_name, wav_path, duration_s, prompt_text, tags,
+                         elevenlabs_voice_id, vibevoice_ref_path, vibevoice_speaker_tag""",
             name, display_name, wav_path, source_path,
             duration_s, prompt_text, tags or [],
+            vibevoice_ref_path, vibevoice_speaker_tag,
         )
         return _row_to_voice(row)
 
@@ -105,4 +127,6 @@ def _row_to_voice(row) -> Voice:
         prompt_text=row["prompt_text"],
         tags=list(row["tags"] or []),
         elevenlabs_voice_id=row["elevenlabs_voice_id"],
+        vibevoice_ref_path=row["vibevoice_ref_path"],
+        vibevoice_speaker_tag=row["vibevoice_speaker_tag"],
     )

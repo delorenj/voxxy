@@ -1,0 +1,54 @@
+[project]
+name = "vox-engine-vibevoice"
+version = "0.1.0"
+description = "Microsoft VibeVoice-1.5B synthesis engine microservice for vox-tts"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2",
+    "soundfile",
+    "numpy",
+    # librosa for 24 kHz resampling of incoming reference clips. VibeVoice's
+    # processor expects 24 kHz; rather than trust the caller, we resample.
+    "librosa>=0.10",
+    # VibeVoice is loaded via transformers (trust_remote_code=True). The
+    # upper bound is because the community fork pins <5.0; v5 introduces
+    # breaking API changes incompatible with VibeVoice's custom modeling code.
+    # The community fork pins these exact versions; match upstream to avoid
+    # VibeVoiceProcessor import failures. v4.52+ breaks the custom modeling
+    # code, and accelerate >=1.7 changed APIs the package uses.
+    "transformers==4.51.3",
+    "accelerate==1.6.0",
+    "torch>=2.5.0,<2.7",
+    "torchaudio>=2.5.0,<2.7",
+    # HF model downloads during lifespan load.
+    "huggingface-hub>=0.25",
+    # VibeVoice's custom processor + inference classes. Not auto-discoverable
+    # via AutoProcessor/AutoModelForCausalLM because HF's config.json has no
+    # auto_map entry (and processor_config.json is absent); we must import
+    # VibeVoiceProcessor + VibeVoiceForConditionalGenerationInference directly
+    # from the community package. Source pin below.
+    "vibevoice",
+    # Community package's own declared deps that aren't captured by the
+    # transitive set above.
+    "diffusers",
+    "peft",
+    "scipy",
+    "tqdm",
+]
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
+torchaudio = { index = "pytorch-cu124" }
+# Microsoft archived the original repo; the community fork is the only
+# maintained distribution and exposes the processor/model classes we import.
+vibevoice = { git = "https://github.com/vibevoice-community/VibeVoice.git" }
