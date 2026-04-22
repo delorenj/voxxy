@@ -1,30 +1,43 @@
 """Synthesis engines with a pluggable interface and fallback orchestration.
 
-Two engines are shipped today:
+Engines are pluggable. Today the shipped set is:
 
-- ``VoxCPMEngine``: local VoxCPM2 via the existing ``Synth`` wrapper. Primary.
-- ``ElevenLabsEngine``: remote ElevenLabs TTS. Fallback, kicks in when the
-  primary OOMs, raises, or times out.
+- ``RemoteEngineClient``: HTTP/JSON client that speaks the ``/v1/synthesize``
+  contract defined in :mod:`app.engine_contract`. Used for every local engine
+  (voxcpm, vibevoice, ...) which run as separate containers on the compose
+  network. See docs/specs/engine-decoupling.md.
+- ``ElevenLabsEngine``: remote ElevenLabs TTS. Stays in-core because it's
+  already a remote call; wrapping it in another container would add a hop for
+  nothing. Terminal fallback when all local engines fail.
+- ``VoxCPMEngine``: legacy in-process wrapper. Kept during Phase 1 of the
+  engine-decoupling migration so the lifespan can still boot against the old
+  topology while the new client is exercised. Removed at the Phase 4
+  checkpoint (T4.5).
 
-The :class:`EngineOrchestrator` is the thing ``main.py`` calls. It owns the
-try-primary-then-fallback policy, records which engine actually served, and
-keeps callers dumb about the retry logic. Adding a third engine later (e.g.
-a second local model, or a different cloud vendor) means implementing
-:class:`SynthEngine` and handing it to the orchestrator in its preferred
-order.
+:class:`EngineOrchestrator` tries engines in order; first success wins. The
+request shape is the same for every engine so a new one is just another
+implementation of :class:`SynthEngine`.
 """
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import io
 import logging
 import os
+import time
 from dataclasses import dataclass
 from typing import Optional, Protocol
 
 import httpx
 import soundfile as sf
 
+from app.engine_contract import (
+    EngineHealth,
+    EngineSynthesizeRequest,
+    EngineSynthesizeResponse,
+)
 from app.synth import Synth
 
 logger = logging.getLogger(__name__)
@@ -191,6 +204,161 @@ class ElevenLabsEngine:
         return SynthResult(wav_bytes=audio, sample_rate=0, engine=self.name)
 
 
+class PermanentEngineError(RuntimeError):
+    """Engine returned a 4xx. Do not fall through to the next engine.
+
+    4xx means the request itself is wrong (bad text, missing voice, malformed
+    reference). Retrying on a different engine would just produce the same
+    failure, and might mask the real issue. Surface it to the caller.
+    """
+
+
+class RemoteEngineClient:
+    """SynthEngine that speaks to a container over HTTP/JSON.
+
+    Matches the ``/v1/synthesize`` + ``/healthz`` contract in
+    :mod:`app.engine_contract`. One instance per configured remote engine;
+    core reads ``VOX_ENGINES`` (``name=url,name=url``) at startup and builds
+    one ``RemoteEngineClient`` per entry.
+
+    Health is cached for ``_HEALTH_TTL_SECONDS`` so ``available()`` doesn't hit
+    the wire on every orchestrator pass; orchestrator loops happen on every
+    synth request, and a 100ms health probe per request per engine adds up.
+    """
+
+    _HEALTH_TTL_SECONDS = 10.0
+
+    def __init__(
+        self,
+        name: str,
+        base_url: str,
+        *,
+        timeout: float = 60.0,
+        health_timeout: float = 2.0,
+    ) -> None:
+        self.name = name
+        self._base_url = base_url.rstrip("/")
+        self._timeout = timeout
+        self._health_timeout = health_timeout
+        # Cached (timestamp, ready) pair. None forces a probe on first call.
+        self._health_cache: Optional[tuple[float, bool]] = None
+        self._health_lock = asyncio.Lock()
+
+    # --- health ---
+
+    async def _probe_health(self) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=self._health_timeout) as client:
+                resp = await client.get(f"{self._base_url}/healthz")
+            if resp.status_code != 200:
+                logger.warning(
+                    "engine %s healthz %d: %s", self.name,
+                    resp.status_code, resp.text[:200],
+                )
+                return False
+            parsed = EngineHealth.model_validate(resp.json())
+            if parsed.engine != self.name:
+                # Not fatal, but worth flagging: config mismatch means a rename
+                # somewhere. Keep serving if ``ready`` is true.
+                logger.warning(
+                    "engine %s name mismatch: remote reports %r",
+                    self.name, parsed.engine,
+                )
+            return bool(parsed.ready and parsed.model_loaded)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("engine %s healthz failed: %r", self.name, exc)
+            return False
+
+    def available(self) -> bool:
+        """Non-async per Protocol; reads the cached health value.
+
+        First call returns True optimistically so the first synth attempt
+        triggers a real probe via ``generate()``. Subsequent calls reflect the
+        last observed health within the TTL window.
+        """
+        if self._health_cache is None:
+            return True
+        ts, ok = self._health_cache
+        if time.monotonic() - ts > self._HEALTH_TTL_SECONDS:
+            return True  # let the next generate() refresh the cache
+        return ok
+
+    async def refresh_health(self) -> bool:
+        """Explicit async probe. Useful for /healthz aggregation in core."""
+        async with self._health_lock:
+            ok = await self._probe_health()
+            self._health_cache = (time.monotonic(), ok)
+            return ok
+
+    # --- generate ---
+
+    async def generate(
+        self,
+        *,
+        text: str,
+        reference_wav_path: Optional[str] = None,
+        prompt_text: Optional[str] = None,
+        voice_id: Optional[str] = None,
+        cfg: float = 2.0,
+        steps: int = 10,
+    ) -> SynthResult:
+        ref_b64: Optional[str] = None
+        ref_sr: Optional[int] = None
+        if reference_wav_path:
+            # Read raw bytes, don't decode/re-encode. Engines know how to handle
+            # WAV framing; keeping bytes intact preserves whatever bit depth
+            # and channel layout the caller chose.
+            with open(reference_wav_path, "rb") as fh:
+                ref_bytes = fh.read()
+            ref_b64 = base64.b64encode(ref_bytes).decode("ascii")
+            try:
+                ref_sr = int(sf.info(reference_wav_path).samplerate)
+            except Exception:
+                ref_sr = None
+
+        payload = EngineSynthesizeRequest(
+            text=text,
+            reference_audio_b64=ref_b64,
+            reference_sample_rate=ref_sr,
+            prompt_text=prompt_text,
+            voice_id=voice_id,
+            cfg=cfg,
+            steps=steps,
+        )
+
+        url = f"{self._base_url}/v1/synthesize"
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                resp = await client.post(url, json=payload.model_dump())
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            self._health_cache = (time.monotonic(), False)
+            raise RuntimeError(
+                f"engine {self.name} transport error: {exc!r}"
+            ) from exc
+
+        if resp.status_code == 200:
+            body = EngineSynthesizeResponse.model_validate(resp.json())
+            wav = base64.b64decode(body.wav_b64)
+            # Mark healthy on success so subsequent available() checks stay cheap.
+            self._health_cache = (time.monotonic(), True)
+            return SynthResult(
+                wav_bytes=wav, sample_rate=body.sample_rate, engine=self.name,
+            )
+
+        # Non-2xx. Distinguish between "try the next engine" and "stop here".
+        body_text = resp.text[:500]
+        if 400 <= resp.status_code < 500:
+            # Bad input; next engine will hit the same error. Surface it.
+            raise PermanentEngineError(
+                f"engine {self.name} {resp.status_code}: {body_text}"
+            )
+        # 5xx: transient on this engine. Mark unhealthy, fall through.
+        self._health_cache = (time.monotonic(), False)
+        raise RuntimeError(
+            f"engine {self.name} {resp.status_code}: {body_text}"
+        )
+
+
 class EngineOrchestrator:
     """Try engines in order. First success wins; log every fallback."""
 
@@ -223,6 +391,10 @@ class EngineOrchestrator:
                 )
                 logger.info("engine %s served (%d bytes)", engine.name, len(result.wav_bytes))
                 return result
+            except PermanentEngineError:
+                # 4xx from a remote engine: propagate, don't try the next.
+                # Retrying would just reproduce the same validation error.
+                raise
             except Exception as exc:  # noqa: BLE001 - deliberately broad
                 last_exc = exc
                 # repr() because many torch/voxcpm exceptions have empty str().

@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS voices (
     tags         text[]      NOT NULL DEFAULT '{}',
     -- optional ElevenLabs voice id for the fallback engine (NULL = default)
     elevenlabs_voice_id text,
+    -- optional per-engine reference overrides (NULL = fall back to wav_path).
+    -- Added for the decoupled engine topology (docs/specs/engine-decoupling.md).
+    vibevoice_ref_path    text,
+    vibevoice_speaker_tag text,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now()
 );

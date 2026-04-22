@@ -2,6 +2,12 @@ voices/**/*
 audio-cache/
 .env
 
+# Python bytecode + virtualenvs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+
 # Dev-only symlinks for local skill discovery; not portable across machines.
 .agents/skills/google-agent-skills
 .claude/skills
