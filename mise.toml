@@ -59,6 +59,10 @@ run = "docker logs -f vox"
 description = "Tail voxxy-engine-voxcpm logs"
 run = "docker logs -f voxxy-engine-voxcpm"
 
+[tasks."logs:vibevoice"]
+description = "Tail voxxy-engine-vibevoice logs"
+run = "docker logs -f voxxy-engine-vibevoice"
+
 [tasks.health]
 description = "Hit /healthz and pretty-print engine availability"
 run = "curl -fsS https://vox.delo.sh/healthz | python3 -m json.tool"
@@ -67,17 +71,27 @@ run = "curl -fsS https://vox.delo.sh/healthz | python3 -m json.tool"
 description = "End-to-end: synthesize via speak_url, fetch the URL, probe the codec"
 run = '''
 set -euo pipefail
-resp=$(curl -fsS -X POST https://vox.delo.sh/synthesize-url \
+resp=$(curl -fsS -D /tmp/vox_smoke_headers.txt -X POST https://vox.delo.sh/synthesize-url \
   -H 'content-type: application/json' \
   -d '{"text":"Vox smoke test.","voice":"rick"}')
 echo "$resp" | python3 -m json.tool
 url=$(echo "$resp" | python3 -c "import json,sys; print(json.load(sys.stdin)['audio_url'])")
+echo "--- response headers ---"
+cat /tmp/vox_smoke_headers.txt
+echo "--- checking X-Vox-Engine header ---"
+grep -i '^x-vox-engine:' /tmp/vox_smoke_headers.txt || { echo "FAIL: X-Vox-Engine header missing"; exit 1; }
 curl -fsSL "$url" -o /tmp/vox_smoke.ogg
 file /tmp/vox_smoke.ogg
 ffprobe -v error -show_entries stream=codec_name,sample_rate,channels \
         -show_entries format=duration \
         -of default=noprint_wrappers=1 /tmp/vox_smoke.ogg
+echo "--- engine-contract live check ---"
+bash scripts/verify-engine-contract.sh --live
 '''
+
+[tasks.verify]
+description = "Run the engine-contract verifier against the live stack (/healthz + /synthesize-url round-trip)"
+run = "bash scripts/verify-engine-contract.sh --live"
 
 [tasks.migrate]
 description = "Apply SQL migrations against the host postgres `vox` database"

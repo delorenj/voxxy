@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field
 
 from app import audio as audio_codec
 from app import cache as audio_cache
-from app.engines import ElevenLabsEngine, EngineOrchestrator, RemoteEngineClient, SynthResult
+from app.engines import ElevenLabsEngine, EngineOrchestrator, PermanentEngineError, RemoteEngineClient, SynthResult
 from app.voices import VOICES_DIR, Voice, VoiceRepo
 
 logging.basicConfig(
@@ -343,27 +343,41 @@ async def install_sh(request: Request) -> Response:
 async def synthesize(req: SynthesizeRequest) -> Response:
     """Raw WAV synthesis. Runs the engine chain, returns the winning engine's bytes."""
     assert _engine is not None and _repo is not None
-    result = await _synthesize_wav(
-        text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
+    try:
+        result = await _synthesize_wav(
+            text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
+        )
+    except PermanentEngineError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        logger.exception("synthesize failed")
+        raise HTTPException(500, f"synthesis failed: {exc}") from exc
+    return Response(
+        content=result.wav_bytes,
+        media_type="audio/wav",
+        headers={"X-Vox-Engine": result.engine},
     )
-    return Response(content=result.wav_bytes, media_type="audio/wav")
 
 
 @app.post("/synthesize-url", response_model=SynthesizeUrlResponse)
-async def synthesize_url(req: SynthesizeRequest, request: Request) -> SynthesizeUrlResponse:
+async def synthesize_url(req: SynthesizeRequest, request: Request, response: Response) -> SynthesizeUrlResponse:
     """Synthesize with engine fallback, transcode to OGG/Opus, return a URL.
 
     Consumers like Telegram's sendVoice fetch the URL directly from our
     /audio/<id>.ogg route. The cache entry expires per ``VOX_AUDIO_TTL_SECONDS``.
     """
     try:
-        return await _synthesize_and_cache(
+        resp = await _synthesize_and_cache(
             text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
             request=request,
         )
+    except PermanentEngineError as exc:
+        raise HTTPException(400, str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("synthesize_url failed")
         raise HTTPException(500, f"synthesis failed: {exc}") from exc
+    response.headers["X-Vox-Engine"] = resp.engine
+    return resp
 
 
 @app.get("/audio/{cache_id}.ogg", name="get_audio")

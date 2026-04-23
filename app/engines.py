@@ -333,7 +333,9 @@ class EngineOrchestrator:
                 and lets each engine use a different reference clip (e.g. a
                 de-noised version for VibeVoice).
         """
+        text_len = len(text)
         last_exc: Optional[BaseException] = None
+        tried: list[str] = []  # engines attempted before the winner (for fallback tracking)
         for engine in self._engines:
             if not engine.available():
                 logger.info("engine %s skipped (unavailable)", engine.name)
@@ -353,6 +355,11 @@ class EngineOrchestrator:
                     steps=steps,
                 )
                 logger.info("engine %s served (%d bytes)", engine.name, len(result.wav_bytes))
+                fallback_from = ",".join(tried)
+                logger.info(
+                    "synth.completed engine=%s text_len=%d bytes=%d sample_rate=%d fallback_from=%s",
+                    engine.name, text_len, len(result.wav_bytes), result.sample_rate, fallback_from,
+                )
                 return result
             except PermanentEngineError:
                 # 4xx from a remote engine: propagate, don't try the next.
@@ -366,8 +373,13 @@ class EngineOrchestrator:
                 logger.warning(
                     "engine %s failed: %r", engine.name, exc, exc_info=True,
                 )
+                tried.append(engine.name)
                 continue
         # All engines failed. Raise the last error for the caller to translate.
+        logger.warning(
+            "synth.failed tried=%s last_error=%r text_len=%d",
+            ",".join(tried), last_exc, text_len,
+        )
         raise RuntimeError(
             f"all synthesis engines failed; last error: {last_exc!r}"
         )
