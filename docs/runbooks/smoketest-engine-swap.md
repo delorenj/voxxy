@@ -1,8 +1,9 @@
 # Smoketest: Engine Swap + Voice Cloning
 
-Five-scenario walkthrough that exercises the decoupled engine topology end-to-end.
+Five-scenario walkthrough that exercises the decoupled engine topology end-to-end,
+driven entirely from the `voxxy` CLI.
 
-**Related:** [[engine-decoupling|docs/specs/engine-decoupling.md]] · [[engine-decoupling.plan|docs/specs/engine-decoupling.plan.md]]
+**Related:** [[engine-decoupling|docs/specs/engine-decoupling.md]] · [[engine-decoupling.plan|docs/specs/engine-decoupling.plan.md]] · [[voxxy-cli|docs/specs/voxxy-cli.md]]
 
 **Scope:**
 
@@ -12,17 +13,21 @@ Five-scenario walkthrough that exercises the decoupled engine topology end-to-en
 4. Speak with the default voice (routes to vibevoice)
 5. Clone a new voice via vibevoice zero-shot
 
-All commands assume `cwd = /home/delorenj/code/voxxy` and a fresh shell.
+All commands assume `voxxy` is on `$PATH` (`uv tool install /home/delorenj/code/voxxy/cli`
+has been run) and a fresh shell. `voxxy` discovers the project root via `VOXXY_HOME`,
+config, or cwd walk-up — so you don't need to `cd` into the repo for most commands.
 
 ---
 
 ## 1. Bring up the stack, voxcpm primary
 
-Default `compose.yml` already puts voxcpm first in `VOX_ENGINES`. No override needed.
+Default state (no `.voxxy.state.json`) puts voxcpm first in `VOX_ENGINES`.
+`daemon start` restores the persisted order if present, otherwise uses the
+default from `compose.yml`.
 
 ```bash
-mise run up
-mise run health
+voxxy daemon start
+voxxy health
 ```
 
 **Expected `health` output:**
@@ -38,32 +43,39 @@ mise run health
 }
 ```
 
-If `voxcpm.ready=false`, tail `mise run logs:voxcpm`. First-boot model load is ~45s.
+If `voxcpm.ready=false`, tail `voxxy engine logs voxcpm`. First-boot model load is ~45s.
+
+Full container state + rollup:
+
+```bash
+voxxy daemon status
+```
 
 ---
 
-## 2. Speak with default voice → voxcpm
+## 2. Speak with default voice -> voxcpm
 
-The default voice is `rick` (`voices/rick.wav`, referenced by `VOX_VOICE` env).
-
-```bash
-vox-speak "Hello from VoxCPM on the decoupled stack."
-```
-
-Or via raw HTTP:
+The default voice is `rick` (`voices/rick.wav`, referenced by `VOX_VOICE` env
+or the `default_voice` key in `~/.config/voxxy/config.toml`).
 
 ```bash
-curl -fsS -X POST https://vox.delo.sh/synthesize-url \
-  -H 'content-type: application/json' \
-  -d '{"text":"Hello from VoxCPM.","voice":"rick"}' | python3 -m json.tool
+voxxy speak "Hello from VoxCPM on the decoupled stack."
 ```
 
-**Expected:** JSON body with `"engine": "voxcpm"`, plus `X-Vox-Engine: voxcpm` header.
+Or write to a file for inspection:
+
+```bash
+voxxy speak --out /tmp/voxcpm.ogg "Hello from VoxCPM."
+```
+
+**Expected:** the engine name is echoed to stderr on success (e.g. `engine=voxcpm`).
+The underlying `POST /synthesize-url` response carries `"engine": "voxcpm"`
+plus an `X-Vox-Engine: voxcpm` header.
 
 Confirm structured log:
 
 ```bash
-docker logs --tail 5 vox | grep synth.completed
+voxxy logs core --tail 5 | grep synth.completed
 # → synth.completed engine=voxcpm text_len=N bytes=N sample_rate=48000 fallback_from=
 ```
 
@@ -72,31 +84,35 @@ docker logs --tail 5 vox | grep synth.completed
 ## 3. Flip to vibevoice primary
 
 Engines already running; only core needs to rebind to the reordered registry.
+`voxxy engine use` persists the new order to `.voxxy.state.json`, recreates
+core with the right `VOX_ENGINES`, and polls `/healthz` until the new primary
+reports `ready`.
 
 ```bash
-VOX_ENGINES="vibevoice=http://voxxy-engine-vibevoice:8000,voxcpm=http://voxxy-engine-voxcpm:8000" \
-  op run --env-file .env.template -- \
-  docker compose -f compose.yml -f compose.engines.yml up -d --force-recreate vox
-
-mise run health   # engines array: vibevoice first
+voxxy engine use vibevoice
+voxxy engine list   # vibevoice first
 ```
+
+`engine list` shows the full chain with per-engine VRAM and capabilities; the
+primary is the first row. No raw `docker compose` or `op run` needed.
 
 ---
 
-## 4. Speak with default voice → vibevoice
+## 4. Speak with default voice -> vibevoice
 
 Same invocation as step 2; primary is now vibevoice:
 
 ```bash
-vox-speak "Hello from VibeVoice on the same stack."
+voxxy speak "Hello from VibeVoice on the same stack."
 ```
 
-**Expected:** `"engine": "vibevoice"`, `X-Vox-Engine: vibevoice` header.
+**Expected:** `engine=vibevoice` echoed to stderr; response carries
+`"engine": "vibevoice"` + `X-Vox-Engine: vibevoice` header.
 
 Verify engine-side:
 
 ```bash
-docker logs --tail 20 voxxy-engine-vibevoice | tail -5
+voxxy engine logs vibevoice --tail 20 | tail -5
 # → POST /v1/synthesize HTTP/1.1" 200 OK
 ```
 
@@ -106,52 +122,64 @@ Audio should be noticeably different timbre from step 2 (different model, same r
 
 ## 5. Clone a new voice via vibevoice zero-shot
 
-### 5a. Prepare a 3-10s reference clip
+### 5a. Prepare a reference clip
 
-VibeVoice quality degrades above 10s. Clean, isolated speech preferred.
+VibeVoice quality degrades above ~10s; `voxxy voice add` runs its own
+preprocessing (ffprobe + ffmpeg trim + mono downmix + 24 kHz resample) and
+uploads the clean WAV. You can skip manual prep entirely:
+
+```bash
+# Raw source is fine — voxxy preprocesses before upload
+voxxy voice add /path/to/source.wav --name demoguy --tags demo,male --no-prompt
+```
+
+If you want to pre-trim manually for any reason, the equivalent ffmpeg is:
 
 ```bash
 ffmpeg -i /path/to/source.wav -ss 5 -t 8 -ac 1 -ar 24000 /tmp/new_voice.wav
+voxxy voice add /tmp/new_voice.wav --name demoguy --tags demo,male --no-prompt
 ```
 
-- `-ac 1` mono
-- `-ar 24000` VibeVoice native rate (resample-anyway but cheap to pre-do)
+### 5b. Interactive flow (alternative)
 
-### 5b. Upload the voice profile
+Drop `--no-prompt` for the interactive path:
 
 ```bash
-curl -fsS -X POST https://vox.delo.sh/voices \
-  -F 'name=demoguy' \
-  -F 'display_name=Demo Guy' \
-  -F 'tags=demo,male' \
-  -F 'audio=@/tmp/new_voice.wav' | python3 -m json.tool
+voxxy voice add /tmp/new_voice.wav
+# → probing audio: 44100 Hz, 2ch, 17.3s
+# → preprocessing to 24kHz mono, 8s trim: /tmp/voxxy-prep.wav (ok)
+# ? Voice name (slug): demoguy
+# ? Display name: Demo Guy
+# ? Tags (comma-separated): demo,male
+# ? Apply to engines [voxcpm, vibevoice]: (enter for default)
+# → POST /voices... created (id=demoguy, vibevoice_ref_path=demoguy.wav)
 ```
-
-**Expected response** shows `vibevoice_ref_path: "demoguy.wav"` (auto-populated on upload, per T3.5).
 
 ### 5c. Confirm registration
 
 ```bash
-curl -fsS https://vox.delo.sh/voices | python3 -m json.tool | grep -A 5 demoguy
+voxxy voice list                  # tabled view
+voxxy voice info demoguy          # full detail incl. vibevoice_ref_path
+voxxy voice info demoguy --json   # machine-readable
 ```
+
+`vibevoice_ref_path` should be `demoguy.wav` (auto-populated on upload, per T3.5).
 
 ### 5d. Speak with the cloned voice
 
 ```bash
-vox-speak --voice demoguy "This is a zero-shot clone through VibeVoice."
+voxxy speak --voice demoguy "This is a zero-shot clone through VibeVoice."
 ```
 
-**Expected:** `engine=vibevoice`, output voice matches the timbre of `/tmp/new_voice.wav`.
+**Expected:** `engine=vibevoice`, output voice matches the timbre of the source clip.
 
 ### 5e. Cross-engine sanity (optional)
 
 Upload auto-populates both engine ref paths. Swap back to voxcpm to confirm:
 
 ```bash
-op run --env-file .env.template -- \
-  docker compose -f compose.yml -f compose.engines.yml up -d --force-recreate vox
-sleep 5
-vox-speak --voice demoguy "Same clip, different engine."
+voxxy engine use voxcpm
+voxxy speak --voice demoguy "Same clip, different engine."
 # → engine=voxcpm, different-sounding clone of the same source
 ```
 
@@ -160,11 +188,26 @@ vox-speak --voice demoguy "Same clip, different engine."
 ## Restore default state
 
 ```bash
-op run --env-file .env.template -- \
-  docker compose -f compose.yml -f compose.engines.yml up -d --force-recreate vox
+voxxy engine use voxcpm
 ```
 
-Restores `compose.yml`'s default `VOX_ENGINES` (voxcpm primary, vibevoice secondary, elevenlabs fallback).
+Restores the default primary (voxcpm), with vibevoice secondary and elevenlabs
+terminal fallback. State is persisted so subsequent `voxxy daemon start` boots
+with this order.
+
+To drop back to a clean slate (remove persisted state + wipe audio cache):
+
+```bash
+voxxy daemon reset
+rm -f /home/delorenj/code/voxxy/.voxxy.state.json
+voxxy daemon start
+```
+
+To also remove the throwaway clone from step 5:
+
+```bash
+voxxy voice delete demoguy --yes
+```
 
 ---
 
@@ -172,17 +215,18 @@ Restores `compose.yml`'s default `VOX_ENGINES` (voxcpm primary, vibevoice second
 
 | Step | Symptom | Cause | Fix |
 |---|---|---|---|
-| 1 | `ready=false` on voxcpm | Model still loading | Wait, retry `mise run health` |
-| 2/4 | 500, `synth.failed` in logs | Engine OOM or crashed | `mise run logs:<engine>`; VRAM pressure likely |
-| 4 | Engine returns `voxcpm` not `vibevoice` | `VOX_ENGINES` env not applied | `docker exec vox env \| grep VOX_ENGINES` |
-| 5b | 400 on upload | Audio format unreadable by `sf.info` | Re-encode via step 5a ffmpeg |
-| 5d | 400 `No valid speaker lines` | Speaker-label auto-promote regex missed | Prefix text with `Speaker 1: ` manually |
-| 5d | Clone sounds like default, not source | `vibevoice_ref_path` NULL | `psql -c "SELECT name, vibevoice_ref_path FROM voices WHERE name='demoguy'"` |
+| 1 | `ready=false` on voxcpm | Model still loading | Wait, retry `voxxy health` |
+| 2/4 | 500, `synth.failed` in logs | Engine OOM or crashed | `voxxy engine logs <engine>`; VRAM pressure likely |
+| 4 | Engine returns `voxcpm` not `vibevoice` | `voxxy engine use` didn't recreate core, or `.voxxy.state.json` stale | `voxxy engine list` to verify chain; `voxxy daemon restart` |
+| 5a | `voice add` fails at probe | Audio format unreadable by ffprobe | Convert to WAV/OGG first; `ffmpeg -i src.ext out.wav` |
+| 5d | 400 `No valid speaker lines` | Speaker-label auto-promote regex missed | Prefix text with `Speaker 1: ` manually via `voxxy speak "Speaker 1: ..."` |
+| 5d | Clone sounds like default, not source | `vibevoice_ref_path` NULL | `voxxy voice info demoguy --json` and check the field |
 
 ---
 
 ## See also
 
 - [[engine-decoupling|docs/specs/engine-decoupling.md]] full architecture
+- [[voxxy-cli|docs/specs/voxxy-cli.md]] CLI surface + design
 - `scripts/verify-engine-contract.sh --live` cheaper health-only probe
-- `mise run smoke` default-engine codec probe (subset of this runbook)
+- `mise run smoke` (alias for `voxxy` default-engine codec probe; subset of this runbook)

@@ -1,76 +1,94 @@
-# mise tasks for vox-tts. Wraps docker compose invocations with `op run` so
-# secrets stay in 1password instead of on disk.
+# mise tasks for vox-tts. Thin aliases to `voxxy`; see cli/ for the implementation.
 #
-# Topology (see docs/specs/engine-decoupling.md):
-#   compose.yml          — voxxy-core (CPU-only transport/routing)
-#   compose.engines.yml  — GPU-bound engine sidecars (voxcpm, vibevoice, ...)
+# The CLI (`voxxy`) is the single source of truth for stack lifecycle, engine
+# swap, voice management, and synthesis. These tasks exist so muscle memory
+# built against `mise run <x>` keeps working; each one shells out to the
+# corresponding `voxxy` subcommand.
+#
+# Raw-compose holdouts:
+#   - `build` / `build:core` / `build:voxcpm` / `build:vibevoice` still wrap
+#     `docker compose build` directly because the CLI doesn't own image-build
+#     ops in v1.
+#   - `migrate` wraps `psql` against host postgres (CLI doesn't manage schema).
 #
 # Usage:
-#   mise run up              # full stack (core + engines)
-#   mise run up:core-only    # just core; engines managed externally
-#   mise run up:engines      # just engines (useful for partial restart)
-#   mise run down            # stop + remove all containers
-#   mise run logs            # tail core logs
-#   mise run logs:voxcpm     # tail voxcpm engine logs
-#   mise run restart         # recreate core (picks up app/ code changes)
-#   mise run health          # curl /healthz and pretty-print engine status
-#   mise run smoke           # end-to-end synthesize + fetch + probe
-#   mise run migrate         # apply SQL migrations against host postgres
-#   mise run build           # rebuild all images
-#   mise run build:voxcpm    # rebuild just the voxcpm engine
 #   mise tasks               # list every task with descriptions
+#   mise run up              # full stack (core + engines)
+#   mise run smoke           # end-to-end synthesize + fetch + probe
+#   mise run install-cli     # bootstrap voxxy globally (alias for `voxxy daemon install`)
 
 [tools]
 # Pin nothing here; defer to the host. This file is task-focused, not env-focused.
 
 [env]
-# Path mise resolves against when running `op run`. Kept in-repo so it travels
-# with the code and is self-explanatory.
+# Path mise resolves against when running `op run` (for the raw-compose tasks).
 VOX_OP_ENV_FILE = ".env.template"
-# Compose file list. Engines are an overlay so `up:core-only` can drop them.
+# Compose file list for raw-compose build tasks.
 VOX_COMPOSE_FULL = "-f compose.yml -f compose.engines.yml"
 VOX_COMPOSE_CORE = "-f compose.yml"
 
+# ---------------------------------------------------------------------------
+# Stack lifecycle — alias to `voxxy daemon *`
+# ---------------------------------------------------------------------------
+
 [tasks.up]
-description = "Build + start the full stack (core + engines) with secrets from 1password"
-run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} up -d --build"
+description = "Start the full stack (core + engines). Alias for `voxxy daemon start`."
+run = "voxxy daemon start"
 
 [tasks."up:core-only"]
-description = "Start only voxxy-core (engines managed externally)"
-run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_CORE}} up -d --build"
+description = "Start only voxxy-core. Alias for `voxxy daemon start --core-only`."
+run = "voxxy daemon start --core-only"
 
 [tasks."up:engines"]
-description = "Start only the engine sidecars (core managed externally)"
-run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} up -d --build voxxy-engine-voxcpm"
+description = "Start only the engine sidecars. Alias for `voxxy daemon start --engines-only`."
+run = "voxxy daemon start --engines-only"
 
 [tasks.down]
-description = "Stop and remove all containers in the stack"
-run = "docker compose {{env.VOX_COMPOSE_FULL}} down"
+description = "Stop and remove all containers. Alias for `voxxy daemon stop`."
+run = "voxxy daemon stop"
 
 [tasks.restart]
-description = "Recreate voxxy-core (picks up app/ code changes)"
-run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} up -d --build vox"
+description = "Recreate voxxy-core (picks up app/ code changes). Alias for `voxxy daemon restart`."
+run = "voxxy daemon restart"
+
+# ---------------------------------------------------------------------------
+# Logs — alias to `voxxy logs` / `voxxy engine logs`
+# ---------------------------------------------------------------------------
 
 [tasks.logs]
-description = "Tail voxxy-core logs"
-run = "docker logs -f vox"
+description = "Tail voxxy-core logs. Alias for `voxxy logs`."
+run = "voxxy logs"
 
 [tasks."logs:voxcpm"]
-description = "Tail voxxy-engine-voxcpm logs"
-run = "docker logs -f voxxy-engine-voxcpm"
+description = "Tail voxxy-engine-voxcpm logs. Alias for `voxxy engine logs voxcpm`."
+run = "voxxy engine logs voxcpm"
 
 [tasks."logs:vibevoice"]
-description = "Tail voxxy-engine-vibevoice logs"
-run = "docker logs -f voxxy-engine-vibevoice"
+description = "Tail voxxy-engine-vibevoice logs. Alias for `voxxy engine logs vibevoice`."
+run = "voxxy engine logs vibevoice"
+
+# ---------------------------------------------------------------------------
+# Health / verify — alias to `voxxy health`
+# ---------------------------------------------------------------------------
 
 [tasks.health]
-description = "Hit /healthz and pretty-print engine availability"
-run = "curl -fsS https://vox.delo.sh/healthz | python3 -m json.tool"
+description = "Hit /healthz and pretty-print engine availability. Alias for `voxxy health`."
+run = "voxxy health"
+
+[tasks.verify]
+description = "Cheap liveness probe against the stack. Alias for `voxxy health`."
+run = "voxxy health"
+
+# ---------------------------------------------------------------------------
+# Smoke — voxxy health first (fail fast), then the existing live-verifier.
+# ---------------------------------------------------------------------------
 
 [tasks.smoke]
-description = "End-to-end: synthesize via speak_url, fetch the URL, probe the codec"
+description = "End-to-end: healthz preflight, synthesize via speak_url, fetch, probe, and run the engine-contract live verifier."
 run = '''
 set -euo pipefail
+echo "--- voxxy health preflight ---"
+voxxy health
 resp=$(curl -fsS -D /tmp/vox_smoke_headers.txt -X POST https://vox.delo.sh/synthesize-url \
   -H 'content-type: application/json' \
   -d '{"text":"Vox smoke test.","voice":"rick"}')
@@ -89,12 +107,12 @@ echo "--- engine-contract live check ---"
 bash scripts/verify-engine-contract.sh --live
 '''
 
-[tasks.verify]
-description = "Run the engine-contract verifier against the live stack (/healthz + /synthesize-url round-trip)"
-run = "bash scripts/verify-engine-contract.sh --live"
+# ---------------------------------------------------------------------------
+# Raw-compose holdouts — build ops and postgres migrations
+# ---------------------------------------------------------------------------
 
 [tasks.migrate]
-description = "Apply SQL migrations against the host postgres `vox` database"
+description = "Apply SQL migrations against the host postgres `vox` database."
 run = '''
 set -euo pipefail
 for f in migrations/*.sql; do
@@ -105,33 +123,43 @@ done
 '''
 
 [tasks.build]
-description = "Rebuild all images without starting"
+description = "Rebuild all images without starting."
 run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} build"
 
 [tasks."build:core"]
-description = "Rebuild just voxxy-core"
+description = "Rebuild just voxxy-core."
 run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_CORE}} build vox"
 
 [tasks."build:voxcpm"]
-description = "Rebuild just the voxcpm engine image"
+description = "Rebuild just the voxcpm engine image."
 run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} build voxxy-engine-voxcpm"
 
+[tasks."build:vibevoice"]
+description = "Rebuild just the vibevoice engine image."
+run = "op run --env-file {{env.VOX_OP_ENV_FILE}} -- docker compose {{env.VOX_COMPOSE_FULL}} build voxxy-engine-vibevoice"
+
+# ---------------------------------------------------------------------------
+# Install — bootstrap voxxy globally via `voxxy daemon install`
+# ---------------------------------------------------------------------------
+
 [tasks.install-cli]
-description = "Symlink scripts/vox-speak into ~/.local/bin for shell-wide use"
+description = "Install voxxy globally + shell completions. Alias for `voxxy daemon install --completions`."
 run = '''
 set -eu
-src="$(pwd)/scripts/vox-speak"
-dst="$HOME/.local/bin/vox-speak"
-if [ ! -x "$src" ]; then
-  echo "missing or non-executable: $src" >&2
+if command -v voxxy >/dev/null 2>&1; then
+  exec voxxy daemon install --completions
+fi
+# Bootstrap case: voxxy isn't on PATH yet. Drop into cli/ and install directly.
+if ! command -v uv >/dev/null 2>&1; then
+  echo "uv is required for the first install." >&2
+  echo "install: https://docs.astral.sh/uv/getting-started/installation/" >&2
   exit 1
 fi
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$src" "$dst"
-echo "linked $dst -> $src"
-if command -v vox-speak >/dev/null 2>&1; then
-  echo "on PATH: $(command -v vox-speak)"
-else
-  echo "warning: ~/.local/bin is not on PATH; add it to your shell rc"
+echo "bootstrapping: voxxy not on PATH; running uv tool install cli/ ..." >&2
+uv tool install --force "$(pwd)/cli"
+if ! command -v voxxy >/dev/null 2>&1; then
+  echo "voxxy installed but not on PATH; add ~/.local/bin to your shell rc" >&2
+  exit 1
 fi
+exec voxxy daemon install --completions
 '''

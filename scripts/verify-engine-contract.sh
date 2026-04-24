@@ -103,6 +103,24 @@ print('  field ${field} =', repr(d['${field}'])[:80])
   echo "$file_out" | grep -qi "ogg\|opus\|vorbis" \
     || die "audio file does not appear to be OGG/Opus: $file_out"
 
+  # --- voxxy CLI spot-check ---
+  echo "--- voxxy CLI spot-check ---"
+  if ! command -v voxxy >/dev/null 2>&1; then
+    echo "(skipping voxxy spot-check; CLI not installed)"
+  else
+    # voxxy health exits 0 on ok
+    voxxy health --json >/dev/null || { echo "FAIL: voxxy health"; exit 1; }
+    # voxxy voice list --json returns a JSON array
+    voxxy voice list --json | jq -e 'type == "array"' >/dev/null || { echo "FAIL: voxxy voice list not array"; exit 1; }
+    # voxxy speak --raw produces WAV magic (write to temp file to avoid SIGPIPE
+    # under set -euo pipefail when head closes the pipe before voxxy drains)
+    voxxy speak --raw "verify" >/tmp/vox_cli_check.wav 2>/dev/null
+    head_bytes=$(dd if=/tmp/vox_cli_check.wav bs=1 count=4 2>/dev/null)
+    rm -f /tmp/vox_cli_check.wav
+    [[ "$head_bytes" == "RIFF" ]] || { echo "FAIL: voxxy speak output not RIFF (got: $head_bytes)"; exit 1; }
+    echo "voxxy ok"
+  fi
+
   echo "=== live check passed ==="
 }
 

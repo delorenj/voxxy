@@ -32,27 +32,51 @@ Voice profile metadata lives in a host postgres DB (`vox`); reference WAV bytes 
 
 ## Common commands
 
-Build + run (primary workflow). Prefer the `mise` tasks; they wrap `docker compose -f compose.yml -f compose.engines.yml` with `op run` so ElevenLabs / postgres secrets stay in 1password:
+Primary surface is `voxxy` (installed globally via `uv tool install /home/delorenj/code/voxxy/cli`). It wraps `docker compose -f compose.yml -f compose.engines.yml` with `op run` so ElevenLabs / postgres secrets stay in 1password, and persists the current engine order in `.voxxy.state.json` (gitignored).
 
 ```bash
-mise run up                # full stack: core + voxcpm + vibevoice
-mise run up:core-only      # just voxxy-core (engines managed externally or disabled)
-mise run up:engines        # just the engine sidecars (useful for partial restart)
-mise run down              # stop + remove all
-mise run restart           # recreate voxxy-core after app/ edits
-mise run logs              # docker logs -f vox (core)
-mise run logs:voxcpm       # docker logs -f voxxy-engine-voxcpm
-mise run health            # /healthz with per-engine roll-up
-mise run smoke             # speak_url → fetch → ffprobe + X-Vox-Engine header check
-mise run build             # rebuild all images
-mise run build:core        # rebuild just voxxy-core (fast, no CUDA)
-mise run build:voxcpm      # rebuild just the voxcpm engine image
-mise run build:vibevoice   # rebuild just the vibevoice engine image
-mise run migrate           # apply SQL migrations against host postgres
-mise tasks                 # everything, self-documenting
+# Stack lifecycle
+voxxy daemon start              # full stack: core + voxcpm + vibevoice
+voxxy daemon start --core-only  # just voxxy-core (engines managed externally or disabled)
+voxxy daemon stop               # stop + remove all
+voxxy daemon restart            # recreate voxxy-core after app/ edits
+voxxy daemon status             # container state + per-engine health table
+voxxy daemon reset              # stop + wipe audio-cache (voices preserved; prompts)
+voxxy daemon install            # bootstrap: prereq check, config, shell completions
+
+# Engine control
+voxxy engine list               # ready state, VRAM, capabilities per engine
+voxxy engine use vibevoice      # make <name> primary; persists + recreates core
+voxxy engine enable <name>      # append to chain if absent
+voxxy engine disable <name>     # drop from chain
+voxxy engine logs voxcpm        # docker logs -f voxxy-engine-voxcpm
+
+# Voices
+voxxy voice list
+voxxy voice info rick
+voxxy voice add /path/to/clip.wav                # interactive: preprocess + metadata + upload
+voxxy voice add /path/to/clip.wav --name demo --tags demo,male --no-prompt
+voxxy voice delete <name> --yes
+
+# Synthesis
+voxxy speak "hello"
+voxxy speak --voice morgan "hi"
+voxxy speak --raw "hi" > out.wav                 # WAV to stdout (pipe friendly)
+voxxy speak --out /tmp/foo.ogg "hi"              # OGG/Opus via /synthesize-url
+voxxy speak --via big-chungus "hi"               # synth remote, play local (SSH via-mode)
+
+# Service health + logs + version
+voxxy health                                     # /healthz with per-engine roll-up; exit code reflects status
+voxxy logs core                                  # docker logs -f vox
+voxxy logs voxcpm                                # docker logs -f voxxy-engine-voxcpm
+voxxy version                                    # CLI + server version
 ```
 
-Raw compose still works if 1password is unavailable:
+All list/info/status/health commands accept `--json` for machine consumption. `scripts/vox-speak` is preserved as a compat shim: it `exec`s into `voxxy speak` with the same flag surface (`--voice`, `--raw`, `--via`, `--url`).
+
+Mise tasks (`mise run up`, `mise run health`, `mise run smoke`, `mise run build:core`, `mise run migrate`, …) are kept as thin aliases that call `voxxy` under the hood, so muscle memory and external scripts keep working. `mise tasks` lists the full set.
+
+Raw `docker compose -f compose.yml -f compose.engines.yml ...` still works for low-level debugging when `op` / `voxxy` aren't available:
 ```bash
 docker compose -f compose.yml -f compose.engines.yml up -d --build
 # requires DEFAULT_USERNAME, DEFAULT_PASSWORD, ELEVENLABS_API_KEY in shell env or .env
@@ -172,6 +196,6 @@ Both engines share the same shape and are independently buildable / runnable.
 - **VRAM contention with ollama on the same 3090** → set `OLLAMA_KEEP_ALIVE=0` on the ollama side; voxcpm holds ~5 GB and vibevoice holds ~7.5 GB, neither evictable. Disable one engine via `VOX_ENGINES` if the GPU is oversubscribed.
 - **Telegram `sendVoice` fails with the returned URL** → always pass the `speak_url` result (OGG/Opus), never the `speak` / `/synthesize` result (WAV). Telegram voice notes require OGG.
 - **ElevenLabs fallback never engages** → `ELEVENLABS_API_KEY` unset in the core container env. `GET /healthz` reports per-engine availability; use it to confirm before debugging further.
-- **All engines show unavailable in `/healthz`** → compose network issue or engine sidecars didn't start. `docker ps | grep voxxy` should show core + every engine in `VOX_ENGINES`. Check `docker logs voxxy-engine-<name>` for startup errors.
-- **Core routes to an engine that isn't there** → `VOX_ENGINES` lists it but the sidecar isn't running. Either start it (`mise run up:engines`) or drop it from `VOX_ENGINES` and `mise run restart`.
+- **All engines show unavailable in `/healthz`** → compose network issue or engine sidecars didn't start. `voxxy daemon status` (or `docker ps | grep voxxy`) should show core + every engine in `VOX_ENGINES`. Check `voxxy engine logs <name>` for startup errors.
+- **Core routes to an engine that isn't there** → `VOX_ENGINES` lists it but the sidecar isn't running. Either start it (`voxxy daemon start` / `mise run up:engines`) or drop it via `voxxy engine disable <name>`.
 - **`/audio/<id>.ogg` returns 404 shortly after synthesis** → cache TTL expired (`VOX_AUDIO_TTL_SECONDS`), or the id had non-hex chars (path-traversal guard). Check `docker exec vox ls -la /data/audio-cache/`.

@@ -1,0 +1,38 @@
+[project]
+name = "voxxy"
+version = "0.1.0"
+description = "Unified CLI for vox-tts: stack lifecycle, engine swap, voice cloning, synthesis"
+requires-python = ">=3.12, <3.13"
+dependencies = [
+    # Command tree + pretty terminal output. Typer is built on click; both
+    # are stable and the user already knows click semantics.
+    "typer>=0.12",
+    "rich>=13",
+    # HTTP client over core's public API (same lib core uses, so familiar).
+    "httpx>=0.27",
+    # Contract validation + generic data modeling. Matches core/engines.
+    "pydantic>=2",
+    # TOML write (tomllib read is stdlib in 3.11+).
+    "tomli-w>=1",
+    # Interactive prompts for `voice add` — falls back to plain input when
+    # stdin is not a TTY.
+    "questionary>=2",
+]
+
+[project.scripts]
+voxxy = "voxxy.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+index-url = "https://pypi.org/simple"
+
+[tool.hatch.build.targets.wheel]
+packages = ["voxxy"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

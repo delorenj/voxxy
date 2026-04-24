@@ -80,32 +80,76 @@ response carries an `engine` field (and `X-Vox-Engine` header on
 
 ## Quick start
 
-Secrets live in 1password (`DeLoSecrets` vault). `mise.toml` wraps every docker
-invocation with `op run` so nothing plaintext ever lands on disk:
+`voxxy` is the primary operator surface. It wraps `docker compose` + `op run`
+so 1password secrets never land plaintext on disk, and it persists per-project
+state (current engine order, last change) in `.voxxy.state.json`.
 
 ```bash
-mise run up              # core + both engines, secrets injected at compose time
-mise run health          # /healthz with per-engine availability
-mise run smoke           # end-to-end: synthesize → fetch → ffprobe codec
+# Bootstrap once per workstation (prereq check, config, shell completions)
+voxxy daemon install --completions
 
-mise run up:core-only    # core only; engines managed externally (or disabled)
-mise run up:engines      # engines only; useful for partial restart
-mise run logs            # tail voxxy-core
-mise run logs:voxcpm     # tail voxxy-engine-voxcpm
-mise run build:core      # targeted rebuild (fast; no CUDA)
-mise run build:voxcpm    # rebuild voxcpm engine image
-mise run build:vibevoice # rebuild vibevoice engine image
-mise tasks               # everything, self-documenting
+# Bring up the full stack (voxcpm primary, vibevoice secondary, elevenlabs fallback)
+voxxy daemon start
+voxxy health
+
+# Speak something
+voxxy speak "hello world"
+
+# List available voices
+voxxy voice list
+
+# Clone a voice from an audio clip (interactive)
+voxxy voice add /path/to/clip.wav
 ```
 
-If you prefer raw compose (no 1password dependency), populate `.env` from
-`.env.example` and run:
+Mise task equivalents (`mise run up`, `mise run health`, `mise run smoke`, …)
+remain supported as thin aliases that call `voxxy` internally. `scripts/vox-speak`
+is preserved as a compat shim for existing ssh pipelines — it `exec`s into
+`voxxy speak` with the same flag surface.
+
+If `voxxy` isn't available (minimal machine, CI, debugging), raw compose still
+works: populate `.env` from `.env.example` and run
 
 ```bash
 docker compose -f compose.yml -f compose.engines.yml up -d --build
 ```
 
-Healthcheck: `curl https://vox.delo.sh/healthz`
+Healthcheck either way: `curl https://vox.delo.sh/healthz` or `voxxy health`.
+
+## CLI reference
+
+Full command tree (grouped by sub-app). See `voxxy --help` / `voxxy <group> --help`
+for flags + descriptions.
+
+```
+voxxy daemon start [--core-only]     bring up stack (restores persisted engine order)
+voxxy daemon stop                    stop all containers
+voxxy daemon restart                 recreate voxxy-core after app/ edits
+voxxy daemon reset                   destructive: stop + wipe audio-cache (voices preserved)
+voxxy daemon status                  container + engine health table
+voxxy daemon install [--completions] bootstrap: prereqs, config, shell completions
+
+voxxy engine list                    ready state, VRAM, capabilities per engine
+voxxy engine use <name>              make <name> primary; persists + recreates core
+voxxy engine enable <name>           append to chain if absent
+voxxy engine disable <name>          drop from chain
+voxxy engine logs <name>             docker logs -f voxxy-engine-<name>
+
+voxxy voice list                     all voices with tags, duration, ref paths
+voxxy voice info <name>              full detail for one voice
+voxxy voice add <path> [flags]       preprocess + prompt + upload (interactive)
+voxxy voice delete <name> [--yes]    remove voice (prompts unless --yes)
+
+voxxy speak [TEXT] [flags]           synthesize; reads stdin if TEXT omitted
+                                     flags: --voice, --url, --via <host>, --raw,
+                                            --play, --out <file>, --engine <name>
+
+voxxy health                         /healthz formatted; exit code reflects status
+voxxy logs <service>                 docker logs -f {core|voxcpm|vibevoice}
+voxxy version                        CLI + server version
+```
+
+All list/info/status/health commands accept `--json` for machine consumption.
 
 ## Public API surface
 
@@ -152,34 +196,37 @@ curl https://vox.delo.sh/healthz
 #               {"name":"elevenlabs","available":true}]}
 ```
 
-### CLI (`vox-speak`)
+### CLI (`voxxy speak`)
 
-A thin wrapper over `POST /synthesize` for interactive use and SSH playback.
-Reads text from args or stdin, plays through the local audio sink by default,
-or emits raw WAV on stdout so it can be piped across an SSH link.
+A one-shot synthesis verb for interactive use and SSH playback. Reads text
+from args or stdin, plays through the local audio sink by default, or emits
+raw WAV on stdout so it can be piped across an SSH link. `scripts/vox-speak`
+remains as a compat shim that `exec`s into `voxxy speak`, so existing ssh
+pipelines keep working unchanged.
 
 ```bash
-# Install on any workstation — the service hosts its own CLI:
-curl -fsSL https://vox.delo.sh/install.sh | sh
-# override target dir:
-curl -fsSL https://vox.delo.sh/install.sh | VOX_INSTALL_DIR=/opt/bin sh
-# dev-only alternative (symlinks the repo copy into ~/.local/bin):
-mise run install-cli
+# Install on any workstation — the CLI ships as a uv tool:
+uv tool install /home/delorenj/code/voxxy/cli
+# Or after cloning: `voxxy daemon install --completions` to bootstrap.
 
 # Local playback (default voice: rick)
-vox-speak "systems nominal"
-vox-speak -v morgan "it's morgan"
-echo "from stdin" | vox-speak
+voxxy speak "systems nominal"
+voxxy speak --voice morgan "it's morgan"
+echo "from stdin" | voxxy speak
 
-# Save to a file
-vox-speak --raw "archive me" > out.wav
+# Save to a file (WAV via --raw, OGG/Opus via --out)
+voxxy speak --raw "archive me" > out.wav
+voxxy speak --out /tmp/archive.ogg "archive me"
 
 # Remote synth, local speakers — explicit SSH pipeline
-ssh big-chungus vox-speak --raw "deploy finished" | paplay
+ssh big-chungus voxxy speak --raw "deploy finished" | paplay
 
 # Same thing, built into the tool
-vox-speak --via big-chungus "deploy finished"
-VOX_REMOTE_HOST=big-chungus vox-speak "deploy finished"
+voxxy speak --via big-chungus "deploy finished"
+VOX_REMOTE_HOST=big-chungus voxxy speak "deploy finished"
+
+# The vox-speak shim is preserved verbatim for legacy callers:
+vox-speak --raw "legacy pipeline still works" | paplay
 ```
 
 In via-mode the text payload travels over SSH's stdin (not the command line),
@@ -189,10 +236,11 @@ env vars on the *local* box do not leak to the remote.
 
 Env overrides: `VOX_VOICE` (default voice), `VOX_URL` (service base URL,
 defaults to `https://vox.delo.sh`), `VOX_PLAYER` (default `paplay`),
-`VOX_REMOTE_HOST` (SSH host for via-mode), `VOX_REMOTE_BIN` (remote script path,
-defaults to `vox-speak` — requires the remote's non-interactive `PATH` to
-include it; put `path=(~/.local/bin $path)` in `~/.zshenv` on the remote, not
-`~/.zshrc`, or set `VOX_REMOTE_BIN` to an absolute path).
+`VOX_REMOTE_HOST` (SSH host for via-mode), `VOX_REMOTE_BIN` (remote binary,
+defaults to `voxxy` — the remote's non-interactive `PATH` must include it;
+put `path=(~/.local/bin $path)` in `~/.zshenv` on the remote, not `~/.zshrc`,
+or set `VOX_REMOTE_BIN` to an absolute path), `VOXXY_HOME` (project-root
+override for project discovery when operating outside the repo).
 
 ### Telegram voice note (via Bot API)
 
@@ -238,9 +286,22 @@ npm install /home/delorenj/code/voxxy/node-red-contrib-vox
 
 ## Engine swap
 
-Engine selection is fully env-driven — no code changes required. Set
-`VOX_ENGINES` on `voxxy-core` (compose.yml or shell) to an ordered, comma-
-separated list of `name=url` pairs:
+Engine selection is fully env-driven — no code changes required. The CLI is
+the preferred way to reorder:
+
+```bash
+voxxy engine use vibevoice    # make vibevoice primary; persists + recreates core
+voxxy engine disable voxcpm   # drop voxcpm (save ~5 GB VRAM)
+voxxy engine enable voxcpm    # bring it back
+voxxy engine list             # see the current chain + readiness
+```
+
+State is persisted at `.voxxy.state.json` (gitignored) so `voxxy daemon start`
+restores the last-chosen order on boot.
+
+Under the hood, the CLI is setting `VOX_ENGINES` on `voxxy-core` — an ordered,
+comma-separated list of `name=url` pairs. You can still set it directly in
+`compose.yml` or the shell if you prefer:
 
 ```bash
 # Default: voxcpm primary, vibevoice secondary, ElevenLabs terminal fallback
@@ -249,17 +310,14 @@ VOX_ENGINES=voxcpm=http://voxxy-engine-voxcpm:8000,vibevoice=http://voxxy-engine
 # Make vibevoice primary
 VOX_ENGINES=vibevoice=http://voxxy-engine-vibevoice:8000,voxcpm=http://voxxy-engine-voxcpm:8000
 
-# Drop voxcpm entirely (save ~5 GB VRAM)
-VOX_ENGINES=vibevoice=http://voxxy-engine-vibevoice:8000
-
 # ElevenLabs-only (remote fallback, no GPU required)
 VOX_ENGINES=
 ```
 
-Then `mise run restart` to pick up the new ordering. ElevenLabs is always
-appended last when `ELEVENLABS_API_KEY` is set and disappears silently
-otherwise. Dropping a local engine from `VOX_ENGINES` is the same as not
-running its sidecar — no route, no check.
+After editing the env directly, `voxxy daemon restart` picks up the new
+ordering. ElevenLabs is always appended last when `ELEVENLABS_API_KEY` is set
+and disappears silently otherwise. Dropping a local engine from `VOX_ENGINES`
+is the same as not running its sidecar — no route, no check.
 
 To add a third engine: implement the two handlers in §"Development" below,
 drop the image into `compose.engines.yml`, and append it to `VOX_ENGINES`.
@@ -282,6 +340,17 @@ No core changes.
 | `ELEVENLABS_DEFAULT_VOICE`    | Adam | used when a voice has no per-voice mapping |
 | `ELEVENLABS_MODEL_ID`         | `eleven_turbo_v2_5` | ElevenLabs model tier |
 | `ELEVENLABS_OUTPUT_FORMAT`    | `pcm_24000` | any `mp3_*` value skips the WAV wrap |
+
+### CLI (`voxxy`)
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `VOX_VOICE`        | `rick` | default voice for `voxxy speak` |
+| `VOX_URL`          | `https://vox.delo.sh` | service base URL the CLI talks to |
+| `VOX_REMOTE_HOST`  | unset | SSH host for `voxxy speak --via` |
+| `VOX_REMOTE_BIN`   | `voxxy` | remote binary name/path in via-mode |
+| `VOX_PLAYER`       | `paplay` | local audio player for `voxxy speak --play` |
+| `VOXXY_HOME`       | unset | project-root override; falls back to `~/.config/voxxy/config.toml` then walk-up |
 
 ### Per-engine (see each `engines/<name>/README.md`)
 
@@ -306,6 +375,9 @@ projects under `engines/<name>/` with their own `pyproject.toml` and `uv.lock`
 — iterate on them independently the same way.
 
 ### Rebuild individual services
+
+Image rebuilds stay on `mise` (thin alias over `docker compose build`) rather
+than `voxxy`, since `voxxy daemon start` re-uses existing images:
 
 ```bash
 mise run build:core      # fast; just python-slim + ffmpeg + app/
@@ -348,7 +420,7 @@ weights survive rebuilds. Don't convert this to a named volume.
 - **MCP tool invisible to Hermes/OpenClaw** → verify trailing slash on the registered URL (`/mcp/` not `/mcp`); FastAPI 307-redirects and HTTPX drops the POST body. Then `hermes mcp test vox`.
 - **Telegram `sendVoice` fails with the returned URL** → always pass the `speak_url` result (OGG/Opus), never the `speak` / `/synthesize` result (WAV). Telegram voice notes require OGG.
 - **`/audio/<id>.ogg` returns 404 shortly after synthesis** → cache TTL expired (`VOX_AUDIO_TTL_SECONDS`), or the id had non-hex chars (path-traversal guard). `docker exec vox ls -la /data/audio-cache/`.
-- **All engines show unavailable in `/healthz`** → compose network issue or engines weren't started. `docker ps | grep voxxy` should show core + any engines in `VOX_ENGINES`.
+- **All engines show unavailable in `/healthz`** → compose network issue or engines weren't started. `voxxy daemon status` (or `docker ps | grep voxxy`) should show core + any engines in `VOX_ENGINES`.
 
 ### voxcpm-specific
 

@@ -11,3 +11,9 @@ __pycache__/
 # Dev-only symlinks for local skill discovery; not portable across machines.
 .agents/skills/google-agent-skills
 .claude/skills
+
+# voxxy CLI artifacts
+.voxxy.state.json
+cli/.venv/
+cli/**/__pycache__/
+cli/**/*.egg-info/

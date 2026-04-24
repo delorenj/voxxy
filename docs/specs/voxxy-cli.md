@@ -1,6 +1,6 @@
 # Spec: `voxxy` unified CLI
 
-- **Status:** Approved 2026-04-24
+- **Status:** Shipped 2026-04-24
 - **Owner:** jarad
 - **Date:** 2026-04-24
 - **Related:** [[engine-decoupling|docs/specs/engine-decoupling.md]] · [[smoketest-engine-swap|docs/runbooks/smoketest-engine-swap.md]]
