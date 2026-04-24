@@ -2,29 +2,33 @@
 # vox-speak: synthesize speech via the vox service and play it.
 #
 # Usage:
-#   vox-speak "hello world"                   # play through local paplay
-#   vox-speak -v rick "hello world"           # pick a voice (default: rick)
-#   echo "hello" | vox-speak                  # text from stdin
-#   vox-speak --raw "hi" > out.wav            # force WAV to stdout
-#   ssh big-chungus vox-speak --raw "hi" | paplay
-#                                             # remote synth, local playback
+#   vox-speak "hello world"                     # play through local paplay
+#   vox-speak -v rick "hello world"             # pick a voice (default: rick)
+#   echo "hello" | vox-speak                    # text from stdin
+#   vox-speak --raw "hi" > out.wav              # force WAV to stdout
+#   vox-speak --via big-chungus "hi"            # synth remote, play local
+#   VOX_REMOTE_HOST=big-chungus vox-speak "hi"  # same, via env
 #
 # Env:
-#   VOX_VOICE   default voice name                  (default: rick)
-#   VOX_URL     base URL of the vox service         (default: https://vox.delo.sh)
-#   VOX_PLAYER  override the local audio player     (default: paplay)
+#   VOX_VOICE         default voice              (default: rick)
+#   VOX_URL           vox service base URL       (default: https://vox.delo.sh)
+#   VOX_PLAYER        local audio player         (default: paplay)
+#   VOX_REMOTE_HOST   SSH host for via-mode      (unset = local synth)
+#   VOX_REMOTE_BIN    remote vox-speak path      (default: vox-speak)
 
 set -euo pipefail
 
 VOICE="${VOX_VOICE:-rick}"
 VOX_URL="${VOX_URL:-https://vox.delo.sh}"
 PLAYER="${VOX_PLAYER:-paplay}"
-MODE="auto"   # auto | play | raw
+VIA_HOST="${VOX_REMOTE_HOST:-}"
+MODE="auto"        # auto | play | raw
+URL_EXPLICIT=0
 
 die() { printf 'vox-speak: %s\n' "$1" >&2; exit "${2:-1}"; }
 
 usage() {
-  sed -n '2,16p' "$0" | sed 's/^# \?//'
+  sed -n '2,18p' "$0" | sed 's/^# \?//'
   exit "${1:-0}"
 }
 
@@ -32,7 +36,8 @@ args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -v|--voice)  [[ $# -ge 2 ]] || die "--voice needs a value" 2; VOICE="$2"; shift 2 ;;
-    -u|--url)    [[ $# -ge 2 ]] || die "--url needs a value" 2;   VOX_URL="$2"; shift 2 ;;
+    -u|--url)    [[ $# -ge 2 ]] || die "--url needs a value" 2;   VOX_URL="$2"; URL_EXPLICIT=1; shift 2 ;;
+    --via)       [[ $# -ge 2 ]] || die "--via needs a value" 2;   VIA_HOST="$2"; shift 2 ;;
     -r|--raw)    MODE="raw"; shift ;;
     -p|--play)   MODE="play"; shift ;;
     -h|--help)   usage 0 ;;
@@ -55,21 +60,35 @@ text="${text#"${text%%[![:space:]]*}"}"
 text="${text%"${text##*[![:space:]]}"}"
 [[ -n "$text" ]] || die "empty text" 2
 
-for bin in curl jq; do
-  command -v "$bin" >/dev/null 2>&1 || die "missing dependency: $bin" 127
-done
+# Source of WAV bytes depends on mode. In via-mode we shell out to ssh; locally
+# we hit the HTTP endpoint. fetch() writes WAV bytes to stdout either way, so
+# the downstream play/raw branch stays identical.
+if [[ -n "$VIA_HOST" ]]; then
+  command -v ssh >/dev/null 2>&1 || die "missing dependency: ssh" 127
+  remote_bin="${VOX_REMOTE_BIN:-vox-speak}"
+  # printf %q shell-escapes each token so ssh's "join with spaces into a single
+  # command string" transport survives voices or URLs with spaces. Text itself
+  # is piped on stdin, sidestepping the quoting problem entirely.
+  remote_cmd=$(printf '%q ' "$remote_bin" --raw)
+  [[ -n "$VOICE" ]] && remote_cmd+=$(printf '%q ' -v "$VOICE")
+  ((URL_EXPLICIT)) && remote_cmd+=$(printf '%q ' -u "$VOX_URL")
+  fetch() {
+    printf '%s' "$text" | ssh -o BatchMode=yes "$VIA_HOST" "$remote_cmd"
+  }
+else
+  for bin in curl jq; do
+    command -v "$bin" >/dev/null 2>&1 || die "missing dependency: $bin" 127
+  done
+  payload="$(jq -nc --arg t "$text" --arg v "$VOICE" '{text:$t, voice:$v}')"
+  fetch() {
+    curl -sS --fail-with-body -X POST "$VOX_URL/synthesize" \
+         -H 'content-type: application/json' \
+         --data-raw "$payload"
+  }
+fi
 
-payload="$(jq -nc --arg t "$text" --arg v "$VOICE" '{text:$t, voice:$v}')"
-
-fetch() {
-  # --fail-with-body: non-2xx emits body to stderr and exits non-zero.
-  curl -sS --fail-with-body -X POST "$VOX_URL/synthesize" \
-       -H 'content-type: application/json' \
-       --data-raw "$payload"
-}
-
-# Default: play locally if stdout is a TTY (user watching), else emit raw WAV
-# so the bytes can be piped (including back across SSH to a local paplay).
+# Default: play when stdout is a TTY, emit raw WAV when piped. Keeps the SSH
+# pipeline form (ssh host vox-speak --raw | paplay) working alongside via-mode.
 if [[ "$MODE" == "auto" ]]; then
   if [[ -t 1 ]]; then MODE="play"; else MODE="raw"; fi
 fi
