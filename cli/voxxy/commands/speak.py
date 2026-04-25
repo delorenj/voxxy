@@ -77,15 +77,15 @@ def speak(
         help="Force playback mode. Default is auto: play when stdout is TTY, raw otherwise.",
     ),
     out: Optional[Path] = typer.Option(
-        None, "--out",
+        None, "-o", "--out",
         help="Write OGG/Opus audio to this file instead of playing or streaming.",
     ),
     player: Optional[str] = typer.Option(
-        None, "--player",
+        None, "-P", "--player",
         help="Local audio player binary. Defaults to $VOX_PLAYER or 'paplay'.",
     ),
-    cfg_value: float = typer.Option(2.0, "--cfg", min=1.0, max=5.0),
-    steps: int = typer.Option(10, "--steps", min=1, max=50),
+    cfg_value: float = typer.Option(2.0, "-c", "--cfg", min=1.0, max=5.0),
+    steps: int = typer.Option(10, "-S", "--steps", min=1, max=50),
 ) -> None:
     """Synthesize speech via the vox service.
 

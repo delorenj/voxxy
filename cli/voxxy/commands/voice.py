@@ -35,7 +35,7 @@ def register(voice_app: typer.Typer) -> None:
 
 
 def list_voices(
-    as_json: bool = typer.Option(False, "--json", help="Dump raw JSON."),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Dump raw JSON."),
 ) -> None:
     """List saved voice profiles."""
     cfg = load_config()
@@ -79,7 +79,7 @@ def list_voices(
 
 def voice_info(
     name: str = typer.Argument(..., help="Voice slug."),
-    as_json: bool = typer.Option(False, "--json", help="Dump raw JSON."),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Dump raw JSON."),
 ) -> None:
     """Show all metadata for a single voice."""
     cfg = load_config()
@@ -112,13 +112,13 @@ def voice_info(
 
 def add(
     path: Path = typer.Argument(..., help="Source audio file path."),
-    name: str | None = typer.Option(None, "--name", help="Slug (a-z0-9-); auto-prompted if missing."),
-    display_name: str | None = typer.Option(None, "--display-name"),
-    tags: str | None = typer.Option(None, "--tags", help="Comma-separated."),
-    engines: str = typer.Option("voxcpm,vibevoice", "--engine", help="Comma-separated list of engines to populate refs for."),
-    trim_seconds: float = typer.Option(8.0, "--trim-seconds"),
-    sample_rate: int = typer.Option(24000, "--sample-rate"),
-    no_prompt: bool = typer.Option(False, "--no-prompt", help="Skip interactive prompts; --name required."),
+    name: str | None = typer.Option(None, "-n", "--name", help="Slug (a-z0-9-); auto-prompted if missing."),
+    display_name: str | None = typer.Option(None, "-d", "--display-name"),
+    tags: str | None = typer.Option(None, "-t", "--tags", help="Comma-separated."),
+    engines: str = typer.Option("voxcpm,vibevoice", "-e", "--engine", help="Comma-separated list of engines to populate refs for."),
+    trim_seconds: float = typer.Option(8.0, "-T", "--trim-seconds"),
+    sample_rate: int = typer.Option(24000, "-R", "--sample-rate"),
+    no_prompt: bool = typer.Option(False, "-N", "--no-prompt", help="Skip interactive prompts; --name required."),
 ) -> None:
     """Upload an audio file as a new voice profile."""
     # 1. Verify source path exists and is readable.
@@ -273,7 +273,7 @@ def add(
 
 def delete(
     name: str = typer.Argument(..., help="Voice slug."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation."),
+    yes: bool = typer.Option(False, "-y", "--yes", help="Skip confirmation."),
 ) -> None:
     """Delete a voice profile by slug."""
     cfg = load_config()

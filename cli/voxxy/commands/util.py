@@ -30,7 +30,7 @@ def register(app: typer.Typer) -> None:
 # version stays cheap; does not hit the server unless --server is passed.
 # This preserves a <50ms cold start for the common case.
 def version(
-    server: bool = typer.Option(False, "--server", help="Also query /healthz and print server state."),
+    server: bool = typer.Option(False, "-s", "--server", help="Also query /healthz and print server state."),
 ) -> None:
     """Print the voxxy CLI version (and optionally the server's health)."""
     typer.echo(f"voxxy {__version__}")
@@ -45,7 +45,7 @@ def version(
 
 
 def health(
-    as_json: bool = typer.Option(False, "--json", help="Dump raw JSON instead of a table."),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Dump raw JSON instead of a table."),
 ) -> None:
     """Hit /healthz and render the per-engine readiness.
 

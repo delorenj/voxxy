@@ -261,7 +261,7 @@ def _poll_primary(
 # ---------------------------------------------------------------------------
 
 def list_engines(
-    as_json: bool = typer.Option(False, "--json", help="Dump raw JSON."),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Dump raw JSON."),
 ) -> None:
     """List configured engines with readiness state."""
     cfg = load_config()
@@ -443,7 +443,7 @@ def engine_disable(
     name: str = typer.Argument(..., help="Engine to remove from the synthesis chain."),
     force: bool = typer.Option(
         False,
-        "--force",
+        "-f", "--force",
         help="Allow disabling the last local engine (ElevenLabs-only mode).",
     ),
 ) -> None:

@@ -39,13 +39,13 @@ def _root(
     ctx: typer.Context,
     debug: bool = typer.Option(
         False,
-        "--debug",
+        "-d", "--debug",
         help="Raise exceptions instead of handling them gracefully.",
         is_eager=False,
     ),
     quiet: bool = typer.Option(
         False,
-        "--quiet",
+        "-q", "--quiet",
         help="Suppress non-data output (errors still go to stderr).",
         is_eager=False,
     ),

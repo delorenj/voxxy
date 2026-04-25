@@ -152,16 +152,16 @@ def _engines_from_state(project_root: Path) -> str:
 
 def daemon_start(
     core_only: bool = typer.Option(
-        False, "--core-only", help="Start only voxxy-core; skip engine sidecars."
+        False, "-C", "--core-only", help="Start only voxxy-core; skip engine sidecars."
     ),
     engines_only: bool = typer.Option(
-        False, "--engines-only", help="Start only the engine sidecars."
+        False, "-E", "--engines-only", help="Start only the engine sidecars."
     ),
     force_recreate: bool = typer.Option(
-        False, "--force-recreate", help="Force-recreate containers even if up to date."
+        False, "-f", "--force-recreate", help="Force-recreate containers even if up to date."
     ),
     no_rebuild: bool = typer.Option(
-        False, "--no-rebuild", help="Skip docker build; use cached images."
+        False, "-N", "--no-rebuild", help="Skip docker build; use cached images."
     ),
 ) -> None:
     """Bring up the voxxy stack (core + engine sidecars by default)."""
@@ -306,13 +306,13 @@ def daemon_restart() -> None:
 
 def daemon_status(
     wait_healthy: bool = typer.Option(
-        False, "--wait-healthy", help="Block until all containers are healthy."
+        False, "-w", "--wait-healthy", help="Block until all containers are healthy."
     ),
     timeout: int = typer.Option(
-        60, "--timeout", help="Seconds to wait when --wait-healthy is set."
+        60, "-t", "--timeout", help="Seconds to wait when --wait-healthy is set."
     ),
     json_output: bool = typer.Option(
-        False, "--json", help="Dump a JSON blob instead of the Rich table."
+        False, "-j", "--json", help="Dump a JSON blob instead of the Rich table."
     ),
 ) -> None:
     """Show container states and per-engine health from /healthz."""
@@ -451,7 +451,7 @@ def daemon_status(
 
 def daemon_reset(
     yes: bool = typer.Option(
-        False, "--yes", "-y", help="Skip confirmation prompt."
+        False, "-y", "--yes", help="Skip confirmation prompt."
     ),
 ) -> None:
     """Stop all containers and wipe the audio cache. Voices are preserved."""
@@ -721,22 +721,22 @@ def _install_systemd_unit(voxxy_path: str) -> Path:
 
 def daemon_install(
     project: Optional[Path] = typer.Option(
-        None, "--project", help="Project root (default: discover)."
+        None, "-p", "--project", help="Project root (default: discover)."
     ),
     completions: bool = typer.Option(
-        False, "--completions",
+        False, "-c", "--completions",
         help="Install shell completions for the detected shell."
     ),
     systemd: bool = typer.Option(
-        False, "--systemd",
+        False, "-s", "--systemd",
         help="Install a user systemd unit for boot-time reconciliation (optional)."
     ),
     skip_prereq_check: bool = typer.Option(
-        False, "--skip-prereq-check",
+        False, "-k", "--skip-prereq-check",
         help="Skip the docker/op/ffmpeg/psql prereq probe."
     ),
     force: bool = typer.Option(
-        False, "--force",
+        False, "-f", "--force",
         help="Reinstall even if already installed (rewrites config, re-runs uv tool install)."
     ),
 ) -> None:
