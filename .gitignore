@@ -17,3 +17,4 @@ __pycache__/
 cli/.venv/
 cli/**/__pycache__/
 cli/**/*.egg-info/
+_bmad/_memory/
