@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -205,6 +206,39 @@ def _speak_to_file(
     )
 
 
+def _is_ssh_session() -> bool:
+    """Return True if we appear to be running inside an SSH session."""
+    return any(
+        var in os.environ
+        for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+    )
+
+
+def _pulseaudio_forwarded() -> str | None:
+    """Detect a forwarded PulseAudio server common in SSH sessions.
+
+    Returns the ``PULSE_SERVER`` value to use, or *None* if no forwarding
+    is detected.  Checks, in order:
+
+    1. ``PULSE_SERVER`` already set in the environment (trust it).
+    2. TCP port 4713 open on localhost (the standard PulseAudio TCP port
+       often forwarded with ``ssh -R 4713:localhost:4713``).
+    """
+    if os.environ.get("PULSE_SERVER"):
+        return os.environ["PULSE_SERVER"]
+
+    if not _is_ssh_session():
+        return None
+
+    try:
+        with socket.create_connection(("127.0.0.1", 4713), timeout=0.3):
+            return "127.0.0.1:4713"
+    except OSError:
+        pass
+
+    return None
+
+
 def _play_wav(wav_bytes: bytes, player_bin: str) -> None:
     if not shutil.which(player_bin):
         typer.secho(
@@ -212,14 +246,42 @@ def _play_wav(wav_bytes: bytes, player_bin: str) -> None:
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=127)
+
+    env = os.environ.copy()
+    pa_server = _pulseaudio_forwarded()
+    if pa_server:
+        env["PULSE_SERVER"] = pa_server
+    elif env.get("PULSE_SERVER") == "":
+        # An empty PULSE_SERVER breaks libpulse ("Invalid server"). Drop it so
+        # paplay falls back to its default discovery (X11, autospawn, etc.).
+        env.pop("PULSE_SERVER", None)
+
     proc = subprocess.run(
         [player_bin],
         input=wav_bytes,
         check=False,
         capture_output=False,
+        env=env,
     )
     if proc.returncode != 0:
-        typer.secho(f"{player_bin} exited with {proc.returncode}", fg=typer.colors.YELLOW, err=True)
+        if _is_ssh_session() and not _pulseaudio_forwarded():
+            typer.secho(
+                f"{player_bin} failed (exit {proc.returncode}). "
+                "Audio playback inside an SSH session requires PulseAudio forwarding.\n"
+                "Quick fixes:\n"
+                "  • ssh -X <host>                     # X11 forwarding often carries audio\n"
+                "  • ssh -R 4713:localhost:4713 <host>  # forward PA TCP, then set:\n"
+                "    export PULSE_SERVER=127.0.0.1:4713\n"
+                "  • From your local machine instead:\n"
+                "    ssh <host> voxxy speak --raw 'text' | paplay\n"
+                "    voxxy speak --via <host> 'text'",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        else:
+            typer.secho(
+                f"{player_bin} exited with {proc.returncode}",
+                fg=typer.colors.YELLOW, err=True,
+            )
 
 
 def _speak_via_ssh(

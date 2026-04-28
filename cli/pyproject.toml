@@ -2,7 +2,7 @@
 name = "voxxy"
 version = "0.1.0"
 description = "Unified CLI for vox-tts: stack lifecycle, engine swap, voice cloning, synthesis"
-requires-python = ">=3.12, <3.13"
+requires-python = ">=3.12, <3.15"
 dependencies = [
     # Command tree + pretty terminal output. Typer is built on click; both
     # are stable and the user already knows click semantics.

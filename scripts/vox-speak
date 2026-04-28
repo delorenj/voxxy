@@ -12,6 +12,8 @@
 #   ssh host vox-speak --raw "hi"        # same, as long as voxxy is on the
 #                                        # remote's PATH (or vox-speak is
 #                                        # itself a shim on the remote).
+#   ssh -R 4713:localhost:4713 host      # forward PulseAudio, then
+#   vox-speak "hi"                       # interactive SSH playback works
 #   vox-speak --via host "hi"            # same
 #
 # Env vars honored:

@@ -1,4 +1,4 @@
-# vox — universal TTS service
+# voxxy — universal TTS service
 
 A small FastAPI + FastMCP front-end that unifies multiple local TTS engines
 (`voxcpm`, `vibevoice`) plus ElevenLabs as an automatic remote fallback, with
@@ -68,7 +68,9 @@ response carries an `engine` field (and `X-Vox-Engine` header on
 ├── Dockerfile              core image (python:3.12-slim, ffmpeg, no CUDA)
 ├── compose.yml             voxxy-core (Traefik-facing)
 ├── compose.engines.yml     overlay: voxxy-engine-voxcpm + voxxy-engine-vibevoice
-└── .env.example
+├── mise.toml               mise task definitions (thin aliases over voxxy CLI)
+├── .env.example
+└── docs/specs/             architecture + protocol docs
 ```
 
 ## Prereqs
@@ -227,6 +229,14 @@ VOX_REMOTE_HOST=big-chungus voxxy speak "deploy finished"
 
 # The vox-speak shim is preserved verbatim for legacy callers:
 vox-speak --raw "legacy pipeline still works" | paplay
+
+# Audio forwarding when already SSH'd into the host
+# If you have forwarded PulseAudio TCP (port 4713) or X11, playback is
+# auto-detected; otherwise the tool prints setup hints instead of a raw
+# paplay error.
+ssh -R 4713:localhost:4713 big-chungus
+# then inside the session:
+voxxy speak "deploy finished"
 ```
 
 In via-mode the text payload travels over SSH's stdin (not the command line),

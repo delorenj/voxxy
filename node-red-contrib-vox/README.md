@@ -1,13 +1,13 @@
 # node-red-contrib-vox
 
-TTS node for the [vox](../) service (VoxCPM2).
+TTS node for the voxxy service (multi-engine TTS: VoxCPM2, VibeVoice, ElevenLabs fallback).
 
 ## Install (local dev)
 
 From your Node-RED user directory (`~/.node-red` typically):
 
 ```bash
-npm install /home/delorenj/docker/stacks/utils/vox/node-red-contrib-vox
+  npm install /home/delorenj/code/voxxy/node-red-contrib-vox
 node-red-restart
 ```
 
