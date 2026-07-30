@@ -19,6 +19,10 @@ Behavior modes (mirroring the bash original):
 piped on stdin. This preserves the remote-synth + local-play pattern from
 the bash original. The remote side can be any shim that accepts
 ``--raw``, so old ``vox-speak`` installs on remote hosts still work.
+
+If ``VOX_API_KEY`` is set, the underlying HTTP client automatically sends both
+Bearer and ``X-API-Key`` headers so secured Voxxy deployments keep working
+without extra speak-specific flags.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -105,7 +110,7 @@ def speak(
     voice_name = voice or os.environ.get("VOX_VOICE") or cfg.default_voice
     base_url = url or os.environ.get("VOX_URL") or cfg.default_url
     via_host = via or os.environ.get("VOX_REMOTE_HOST") or None
-    player_bin = player or os.environ.get("VOX_PLAYER") or "paplay"
+    player_bin = player or os.environ.get("VOX_PLAYER") or _default_player()
 
     # Resolve text: args > stdin (non-TTY) > error.
     if text:
@@ -138,6 +143,13 @@ def speak(
         mode = "play"
     else:
         mode = "play" if sys.stdout.isatty() else "raw"
+
+    # A --via target that resolves to *this* machine would ssh into ourselves —
+    # the common VOX_REMOTE_HOST=<this box's own name/IP> misconfig (e.g. a shell
+    # rc exporting the LAN IP that happens to be local). That's pointless and it
+    # breaks --out. Fall through to the direct local path instead.
+    if via_host and _via_is_local(via_host):
+        via_host = None
 
     # --via: delegate WAV fetch to the remote host. Text is piped on stdin so
     # quoting quirks stay the remote's problem, same as the bash original.
@@ -174,6 +186,48 @@ def speak(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+def _via_is_local(host: str) -> bool:
+    """True when a ``--via`` target refers to this machine.
+
+    ``VOX_REMOTE_HOST`` is meant to point at the box that runs the vox stack, for
+    use *from another machine*. On the stack host itself the shell rc may still
+    export it (e.g. ``VOX_REMOTE_HOST=<this box's LAN IP>``), which would make
+    ``--via`` ssh into ourselves. We short-circuit that to the direct local path.
+    """
+    if not host:
+        return False
+    target = host.strip()
+    if "@" in target:  # strip an ssh-style user@host prefix
+        target = target.split("@", 1)[1]
+    if target.lower() in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        if target.lower() in {socket.gethostname().lower(), socket.getfqdn().lower()}:
+            return True
+    except OSError:
+        pass
+    # Resolve the target, then ask the kernel which source address it would use
+    # to reach each candidate: for a local address the source equals the address
+    # itself. UDP connect() only sets the route — no packets leave the host.
+    try:
+        addrs = {info[4][0] for info in socket.getaddrinfo(target, None)}
+    except OSError:
+        return False
+    for addr in addrs:
+        family = socket.AF_INET6 if ":" in addr else socket.AF_INET
+        try:
+            probe = socket.socket(family, socket.SOCK_DGRAM)
+            try:
+                probe.connect((addr, 9))
+                if probe.getsockname()[0] == addr:
+                    return True
+            finally:
+                probe.close()
+        except OSError:
+            continue
+    return False
+
 
 def _fetch_wav(
     client: VoxClient, text: str, voice: str | None,
@@ -239,6 +293,45 @@ def _pulseaudio_forwarded() -> str | None:
     return None
 
 
+# Players that accept a raw WAV stream on stdin with no arguments. Anything else
+# (afplay on macOS, etc.) is handed a temp file path instead.
+_STDIN_WAV_PLAYERS = {"paplay", "pw-play", "aplay"}
+
+
+def _default_player() -> str:
+    """Platform-appropriate default audio player.
+
+    macOS ships ``afplay`` (CoreAudio, needs no sound server); Linux desktops
+    have ``paplay`` (PulseAudio/PipeWire). ``$VOX_PLAYER`` overrides either.
+    """
+    if sys.platform == "darwin":
+        return "afplay"
+    return "paplay"
+
+
+def _play_wav_via_file(wav_bytes: bytes, player_bin: str) -> None:
+    """Play via a temp WAV file, for players that can't read stdin (afplay).
+
+    No PulseAudio env dance — these players talk to the OS audio stack directly.
+    """
+    tmp = tempfile.NamedTemporaryFile(prefix="voxxy-", suffix=".wav", delete=False)
+    try:
+        tmp.write(wav_bytes)
+        tmp.flush()
+        tmp.close()
+        proc = subprocess.run([player_bin, tmp.name], check=False)
+        if proc.returncode != 0:
+            typer.secho(
+                f"{player_bin} exited with {proc.returncode}",
+                fg=typer.colors.YELLOW, err=True,
+            )
+    finally:
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+
+
 def _play_wav(wav_bytes: bytes, player_bin: str) -> None:
     if not shutil.which(player_bin):
         typer.secho(
@@ -246,6 +339,12 @@ def _play_wav(wav_bytes: bytes, player_bin: str) -> None:
             fg=typer.colors.RED, err=True,
         )
         raise typer.Exit(code=127)
+
+    # File-based players (afplay, ...) can't consume stdin: write a temp WAV and
+    # pass its path. The stdin + PulseAudio path below is for paplay and friends.
+    if os.path.basename(player_bin) not in _STDIN_WAV_PLAYERS:
+        _play_wav_via_file(wav_bytes, player_bin)
+        return
 
     env = os.environ.copy()
     pa_server = _pulseaudio_forwarded()
@@ -263,6 +362,36 @@ def _play_wav(wav_bytes: bytes, player_bin: str) -> None:
         capture_output=False,
         env=env,
     )
+
+    # A non-zero exit while PULSE_SERVER points at a *remote* server (e.g. a
+    # stale `export PULSE_SERVER=tcp:host:4713` from a forwarding session whose
+    # host is now offline) is almost always "Connection refused". When we're not
+    # in an SSH session there's a working local sound server right here, so retry
+    # once with PULSE_SERVER stripped to let libpulse find the local socket.
+    if (
+        proc.returncode != 0
+        and not _is_ssh_session()
+        and env.get("PULSE_SERVER")
+    ):
+        local_env = env.copy()
+        local_env.pop("PULSE_SERVER", None)
+        local_env.pop("PULSE_SINK", None)
+        retry = subprocess.run(
+            [player_bin],
+            input=wav_bytes,
+            check=False,
+            capture_output=False,
+            env=local_env,
+        )
+        if retry.returncode == 0:
+            typer.secho(
+                f"note: PULSE_SERVER={env['PULSE_SERVER']} was unreachable; "
+                "played on the local sound server instead.",
+                fg=typer.colors.YELLOW, err=True,
+            )
+            return
+        proc = retry
+
     if proc.returncode != 0:
         if _is_ssh_session() and not _pulseaudio_forwarded():
             typer.secho(
