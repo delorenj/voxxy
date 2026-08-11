@@ -124,8 +124,8 @@ def test_synthesize_wav_and_clean_upstream_error(tmp_path: Path) -> None:
         broken.synthesize("hello", str(tmp_path / "broken.wav"), format="wav")
 
 
-def test_real_hermes_plugin_discovery_registers_and_resolves_vox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Exercise Hermes' actual directory scanner, registry, and dispatcher."""
+def test_real_hermes_category_plugin_discovery_registers_vox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Exercise Hermes' category scanner, registry, and TTS dispatcher."""
     hermes_source = Path("/home/delorenj/.hermes/hermes-agent")
     monkeypatch.syspath_prepend(str(hermes_source))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
@@ -144,9 +144,15 @@ def test_real_hermes_plugin_discovery_registers_and_resolves_vox(tmp_path: Path,
 
     tts_registry._reset_for_tests()
     manager = PluginManager()
+    user_manifest_keys = {
+        manifest.key or manifest.name
+        for manifest in manager._collect_directory_manifests()
+        if manifest.source == "user"
+    }
     manager.discover_and_load()
     provider = tts_registry.get_provider("vox")
 
+    assert user_manifest_keys == {"tts/vox"}
     assert manager._plugins["tts/vox"].enabled is True
     assert provider is not None
     assert provider.name == "vox"

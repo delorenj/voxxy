@@ -63,6 +63,9 @@ for a local user who copied the early skeleton. It does not register `voxxy`;
 change that configuration to `vox` and enable `tts/vox`. This avoids a second
 registry name that could silently fall through to Edge.
 
+Hermes supports a two-segment category layout for user plugins. Install this
+plugin at `~/.hermes/plugins/tts/vox`, which registers the `tts/vox` key.
+
 Do not define `tts.providers.vox` as a command provider: Hermes intentionally
 makes a same-name command provider override the plugin.
 

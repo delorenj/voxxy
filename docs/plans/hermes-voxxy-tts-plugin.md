@@ -41,9 +41,10 @@ return a correctly suffixed WAV fallback when ffmpeg is unavailable.
 
 ## Verification scope
 
-Tests cover manifest discovery through a real isolated `HERMES_HOME`, registry
-registration/resolution for `tts.provider: vox`, config-derived `rick`, voice
-listing, native local OGG/Opus synthesis, and clean upstream failure behavior.
+Tests cover category-layout manifest discovery through a real isolated
+`HERMES_HOME`, registry registration/resolution for `tts.provider: vox`,
+config-derived `rick`, voice listing, native local OGG/Opus synthesis, and
+clean upstream failure behavior.
 The test suite includes an opt-in live check against `https://vox.delo.sh`;
 when network is not explicitly enabled it reports the exact skip reason rather
 than claiming a mocked request is live proof.
