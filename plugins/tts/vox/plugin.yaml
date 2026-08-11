@@ -1,0 +1,9 @@
+name: vox
+version: 0.2.0
+description: "Vox HTTP text-to-speech provider for Hermes with local Telegram-ready OGG/Opus artifacts."
+author: Voxxy
+kind: backend
+requires_env:
+  - name: VOX_API_KEY
+    description: "Optional API key for a protected Vox deployment"
+    secret: true

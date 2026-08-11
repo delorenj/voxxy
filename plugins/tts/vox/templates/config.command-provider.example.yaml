@@ -1,0 +1,13 @@
+# Optional command-provider alternative. Do not enable this under the name
+# "vox" while the Python plugin is enabled: command providers intentionally win
+# over same-name plugins. The formal Vox plugin is preferred.
+tts:
+  provider: vox-command
+  voice: rick
+  output_format: ogg
+  providers:
+    vox-command:
+      type: command
+      command: 'voxxy-http-tts --text-file "{input_path}" --out "{output_path}" --format ogg --voice "{voice}"'
+      output_format: ogg
+      voice_compatible: true

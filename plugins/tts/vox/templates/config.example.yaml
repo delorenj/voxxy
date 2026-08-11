@@ -1,0 +1,18 @@
+# Hermes configuration for the canonical Vox TTS provider.
+# No environment variable is needed for the fleet endpoint; VOX_API_KEY is only
+# required if your Vox deployment is protected.
+plugins:
+  enabled:
+    - tts/vox
+
+tts:
+  provider: vox
+  # Hermes dispatch passes this top-level value to the provider.
+  voice: rick
+  # Vox's /synthesize-url endpoint produces a local OGG/Opus artifact, ready
+  # for Telegram voice bubbles without a second local conversion.
+  output_format: ogg
+  vox:
+    base_url: https://vox.delo.sh
+    voice: rick
+    # api_key: ${VOX_API_KEY}
