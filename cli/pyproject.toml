@@ -21,6 +21,7 @@ dependencies = [
 
 [project.scripts]
 voxxy = "voxxy.app:main"
+voxxy-http-tts = "voxxy.http_tts:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -1,0 +1,19 @@
+{
+  "project_name": "Voxxy",
+  "project_description": "",
+  "project_slug": "voxxy",
+  "repo_path": "/home/delorenj/code/voxxy",
+  "ticket_provider": {
+    "type": "plane",
+    "workspace": "",
+    "identifier": "VOXPM",
+    "board_id": "b757648f-0067-482c-84b5-947158a7af3f",
+    "board_url": "https://plane.delo.sh/33god/projects/b757648f-0067-482c-84b5-947158a7af3f/issues/"
+  },
+  "agents": {
+    "voxxy-pm": {
+      "role": "pm",
+      "role_dir": "agents/hermes/pm"
+    }
+  }
+}

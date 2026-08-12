@@ -168,11 +168,39 @@ directly.
 | `GET /healthz` | Per-engine availability + overall status (`overall=false` → 503). |
 | `GET /mcp/` | FastMCP streamable HTTP endpoint (trailing slash required). Tools: `vox:speak`, `vox:speak_url`, `vox:list_voices`. |
 
+
+### Securing `vox.delo.sh` with `VOX_API_KEY`
+
+Set `VOX_API_KEY` on `voxxy-core` to require auth for the useful data plane:
+
+- `POST /synthesize`
+- `POST /synthesize-url`
+- `/voices*`
+- `/mcp*`
+
+These stay public on purpose:
+
+- `GET /healthz` — docker/Traefik monitoring
+- `GET /audio/<id>.ogg` — anonymous fetch for `speak_url` consumers
+- `GET /install.sh`
+- `GET /bin/vox-speak`
+
+Clients can send either header shape; Voxxy accepts both:
+
+```bash
+-H "X-API-Key: $VOX_API_KEY"
+# or send the same value as a Bearer token
+```
+
 ### HTTP examples
 
 ```bash
+# Optional for secured deployments:
+export VOX_API_KEY="replace-me"
+
 # Synthesize for delivery — returns JSON with an OGG/Opus URL
 curl -X POST https://vox.delo.sh/synthesize-url \
+  -H "X-API-Key: $VOX_API_KEY" \
   -H 'content-type: application/json' \
   -d '{"text":"System online","voice":"rick"}'
 # → {"audio_url":"https://vox.delo.sh/audio/<uuid>.ogg",
@@ -180,12 +208,14 @@ curl -X POST https://vox.delo.sh/synthesize-url \
 
 # Raw WAV bytes
 curl -X POST https://vox.delo.sh/synthesize \
+  -H "X-API-Key: $VOX_API_KEY" \
   -H 'content-type: application/json' \
   -d '{"text":"Hello world","voice":"rick"}' \
   -o /tmp/out.wav
 
 # Upload a new voice (auto-trimmed; both voxcpm + vibevoice ref paths populate)
 curl -X POST https://vox.delo.sh/voices \
+  -H "X-API-Key: $VOX_API_KEY" \
   -F name=alice -F display_name="Alice" \
   -F tags="female,english" \
   -F audio=@/path/to/alice.ogg
@@ -245,18 +275,57 @@ any explicit `--url` flag are shell-escaped and forwarded; `VOX_URL`/`VOX_VOICE`
 env vars on the *local* box do not leak to the remote.
 
 Env overrides: `VOX_VOICE` (default voice), `VOX_URL` (service base URL,
-defaults to `https://vox.delo.sh`), `VOX_PLAYER` (default `paplay`),
+defaults to `https://vox.delo.sh`), `VOX_API_KEY` (optional auth for secured
+deployments), `VOX_PLAYER` (default `paplay`),
 `VOX_REMOTE_HOST` (SSH host for via-mode), `VOX_REMOTE_BIN` (remote binary,
 defaults to `voxxy` — the remote's non-interactive `PATH` must include it;
 put `path=(~/.local/bin $path)` in `~/.zshenv` on the remote, not `~/.zshrc`,
 or set `VOX_REMOTE_BIN` to an absolute path), `VOXXY_HOME` (project-root
 override for project discovery when operating outside the repo).
 
+### Automation wrapper (`voxxy-http-tts`)
+
+The rich Python Hermes plugin is the nicest Voxxy integration, but sometimes you
+just want a dead-simple command that reads text and writes a file. `voxxy-http-tts`
+ships alongside `voxxy` for that job.
+
+Install it with the same tool install:
+
+```bash
+uv tool install /home/delorenj/code/voxxy/cli
+```
+
+Examples:
+
+```bash
+# WAV direct from /synthesize
+VOX_URL=https://vox.delo.sh VOX_API_KEY=${VOX_API_KEY:-replace-me} \
+  voxxy-http-tts --text "systems nominal" --out /tmp/vox.wav --json
+
+# Telegram/browser-ready OGG via /synthesize-url
+VOX_URL=https://vox.delo.sh VOX_API_KEY=${VOX_API_KEY:-replace-me} \
+  voxxy-http-tts --text-file ./prompt.txt --voice rick --out /tmp/vox.ogg --format ogg --json
+
+# MP3 transcode for generic automation surfaces
+printf '%s' "deploy finished" | VOX_URL=https://vox.delo.sh VOX_API_KEY=${VOX_API_KEY:-replace-me} \
+  voxxy-http-tts --out /tmp/deploy.mp3 --format mp3 --json
+```
+
+Where it helps:
+
+- Hermes `tts.providers.<name>` command-provider mode
+- n8n Execute Command nodes
+- Claude / Claude Code / shell workflows that want a local audio artifact
+
+See `plugins/tts/voxxy/templates/config.command-provider.example.yaml` for the
+Hermes command-provider template that uses this wrapper.
+
 ### Telegram voice note (via Bot API)
 
 ```bash
 # 1. Synthesize to a fetchable URL
 url=$(curl -fsS -X POST https://vox.delo.sh/synthesize-url \
+       -H "X-API-Key: $VOX_API_KEY" \
        -H 'content-type: application/json' \
        -d '{"text":"Deployment finished","voice":"rick"}' \
       | jq -r .audio_url)
@@ -285,6 +354,11 @@ hermes mcp list
 hermes tools list | grep vox
 # Tools: vox:speak, vox:speak_url, vox:list_voices
 ```
+
+If `/mcp/` is protected, configure your MCP client to send the same API key on
+requests (for example via a fixed header auth setting). The exact flag shape can
+vary by client/version, so check `hermes mcp add --help` or the client's auth
+settings rather than assuming an exported `VOX_API_KEY` is consumed automatically.
 
 ### Node-RED
 
@@ -346,6 +420,7 @@ No core changes.
 | `VOX_AUDIO_TTL_SECONDS`       | `3600` | audio cache lifetime |
 | `VOX_AUDIO_SWEEP_INTERVAL`    | `300` | cache sweep frequency |
 | `VOX_PUBLIC_BASE_URL`         | unset | if set, `speak_url` returns URLs rooted here |
+| `VOX_API_KEY`                 | unset | when set, protects synth/voices/MCP while leaving health/install/audio fetch public |
 | `ELEVENLABS_API_KEY`          | unset | enables ElevenLabs terminal fallback |
 | `ELEVENLABS_DEFAULT_VOICE`    | Adam | used when a voice has no per-voice mapping |
 | `ELEVENLABS_MODEL_ID`         | `eleven_turbo_v2_5` | ElevenLabs model tier |
@@ -357,6 +432,7 @@ No core changes.
 |-----|---------|-------|
 | `VOX_VOICE`        | `rick` | default voice for `voxxy speak` |
 | `VOX_URL`          | `https://vox.delo.sh` | service base URL the CLI talks to |
+| `VOX_API_KEY`      | unset | optional auth shared by `voxxy`, `vox-speak`, and `voxxy-http-tts` |
 | `VOX_REMOTE_HOST`  | unset | SSH host for `voxxy speak --via` |
 | `VOX_REMOTE_BIN`   | `voxxy` | remote binary name/path in via-mode |
 | `VOX_PLAYER`       | `paplay` | local audio player for `voxxy speak --play` |

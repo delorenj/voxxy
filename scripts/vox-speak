@@ -17,7 +17,7 @@
 #   vox-speak --via host "hi"            # same
 #
 # Env vars honored:
-#   VOX_VOICE, VOX_URL, VOX_PLAYER, VOX_REMOTE_HOST, VOX_REMOTE_BIN
+#   VOX_VOICE, VOX_URL, VOX_API_KEY, VOX_PLAYER, VOX_REMOTE_HOST, VOX_REMOTE_BIN
 #
 # If you want to keep calling this as `vox-speak`, do nothing. If you want the
 # new name, call `voxxy speak` directly.

@@ -21,11 +21,14 @@ Design notes:
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
 import httpx
 from pydantic import BaseModel, Field
+
+_USE_ENV = object()
 
 
 # ---------- typed exceptions ----------
@@ -40,6 +43,10 @@ class VoxNotFound(VoxError):
 
 class VoxValidationError(VoxError):
     """Raised for HTTP 4xx responses that are not 404."""
+
+
+class VoxUnauthorized(VoxValidationError):
+    """Raised for HTTP 401 responses."""
 
 
 class VoxServerError(VoxError):
@@ -112,11 +119,39 @@ class VoxClient:
     garbage-collected, or explicitly via the context manager protocol.
     """
 
-    def __init__(self, base_url: str, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout: float = 30.0,
+        api_key: str | None | object = _USE_ENV,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        resolved_api_key = self._resolve_api_key(api_key)
+        self._auth_headers = self._build_auth_headers(resolved_api_key)
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
+            headers=self._auth_headers,
+            transport=transport,
         )
+
+    @staticmethod
+    def _resolve_api_key(api_key: str | None | object) -> str | None:
+        raw = os.environ.get("VOX_API_KEY") if api_key is _USE_ENV else api_key
+        if raw is None:
+            return None
+        cleaned = str(raw).strip()
+        return cleaned or None
+
+    @staticmethod
+    def _build_auth_headers(api_key: str | None) -> dict[str, str]:
+        if not api_key:
+            return {}
+        return {
+            "Authorization": f"Bearer {api_key}",
+            "X-API-Key": api_key,
+        }
 
     def __enter__(self) -> "VoxClient":
         return self
@@ -135,6 +170,8 @@ class VoxClient:
 
         if resp.status_code == 404:
             raise VoxNotFound(f"Not found: {method} {path} → 404")
+        if resp.status_code == 401:
+            raise VoxUnauthorized(f"Unauthorized: {method} {path} → 401")
         if 400 <= resp.status_code < 500:
             body = resp.text[:200]
             raise VoxValidationError(
@@ -249,10 +286,11 @@ class VoxClient:
     def fetch_audio(self, url: str) -> bytes:
         """GET an audio URL and return the raw bytes.
 
-        Used after synthesize_url to download the OGG blob. The URL is expected
-        to be the audio_url from SynthUrlResponse, served via Traefik. We use
-        a plain httpx.get (not self._client) so the full URL is used as-is
-        without base_url prepending.
+        Used after synthesize_url to download the OGG blob. Audio cache URLs are
+        intentionally public so third parties (Telegram, browsers, Home
+        Assistant) can fetch them without credentials. Use a fresh request here
+        rather than the authenticated client so a cross-host ``audio_url`` can
+        never receive our VOX_API_KEY headers by accident.
         """
         try:
             resp = httpx.get(url, timeout=self._client.timeout)
@@ -263,6 +301,8 @@ class VoxClient:
 
         if resp.status_code == 404:
             raise VoxNotFound(f"Audio not found at {url} (cache may have expired)")
+        if resp.status_code == 401:
+            raise VoxUnauthorized(f"Unauthorized fetching audio at {url}")
         if resp.status_code >= 400:
             raise VoxServerError(f"Error fetching audio: {resp.status_code}")
 

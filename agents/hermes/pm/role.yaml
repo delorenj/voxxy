@@ -1,0 +1,66 @@
+# Hermes agent role manifest.  Tracked in the PROJECT repository.
+# The agent's actual state (memory, sessions, evolving SOUL) lives in the
+# runtime submodule.  This file is the immutable contract for this role.
+
+repo: voxxy
+role: pm
+agent_id: voxxy-pm
+display_name: "Voxxy PM"
+purpose: "pm agent for voxxy"
+
+# Inference target (empty = inherit from global ~/.hermes/config.yaml)
+model:
+  provider: ""
+  name: ""
+
+# Hermes profile name. Profile dir is symlinked into ./runtime/.
+profile: voxxy-pm
+
+# Telegram bot identity (one bot per agent — see docs/architecture.md).
+telegram:
+  bot_username: "VoxxyPMBot"
+# Ticket-provider binding (linear | plane | trello).
+# The Scrum Master sentinel talks ONLY to this via .scripts/lib/ticket-provider.sh;
+# swapping providers is a one-line change here. Filled in by 42-ticket-provider.sh.
+ticket_provider:
+  name: plane
+  board_id: "b757648f-0067-482c-84b5-947158a7af3f"
+  board_url: "https://plane.delo.sh/33god/projects/b757648f-0067-482c-84b5-947158a7af3f/issues/"
+  workspace: ""
+  project: ""     # Plane project uuid (set by 42-ticket-provider.sh)
+  # Optional normalized-state name overrides for non-standard boards.
+  in_review: ""   # e.g. "In Review"
+  completed: ""   # e.g. "Done"
+
+# Scrum Master sentinel knobs (only meaningful for role: scrum-master).
+scrum_master:
+  grace_hours: 0             # 0 = no human-approval wait (adversarially-reviewed review-lane = done); set >0 to require a wait
+  auto_review: true          # autonomous adversarial review (act, do not wait) on/off
+  paired_pm: "voxxy-pm"
+
+# Plane project (1:1 with this agent) — retained for fleet-registry back-compat.
+plane:
+  # Empty -> resolved from ~/.config/hermes-agent-template/config.toml [plane].workspace
+  workspace: ""
+  # identifier is set by .scripts/42-ticket-provider.sh after creation (plane only)
+  identifier: "VOXPM"
+# Bloodbank wiring (consumed + produced subjects).
+bloodbank:
+  subscribe:
+    - "bloodbank.evt.v1.repo.voxxy.>"
+    - "bloodbank.cmd.v1.agent.voxxy-pm.>"
+  producer: "hermes-agent:voxxy-pm"
+
+# Runtime repo (git-tracked HERMES_HOME, auto-checkpointed).
+runtime:
+  # Empty owner -> resolved from config.toml [github].runtime_repo_owner.
+  github_owner: ""
+  github_repo: "agent-hm-voxxy-pm"
+  submodule_path: "./runtime"
+  checkpoint:
+    cadence: "hourly"
+    on_session_end: true
+
+# Provenance — managed by the template, do not hand-edit.
+provisioned_at: "2026-06-03T12:48:51Z"
+provisioned_by: hermes-agent-template

@@ -19,6 +19,7 @@ from voxxy.client import (
     VoxNotFound,
     VoxUnreachable,
     VoxValidationError,
+    VoxUnauthorized,
     VoxServerError,
 )
 from voxxy.docker import DockerError
@@ -44,6 +45,7 @@ __all__ = [
     "VoxNotFound",
     "VoxUnreachable",
     "VoxValidationError",
+    "VoxUnauthorized",
     "VoxServerError",
     "DockerError",
     "AudioProbeError",

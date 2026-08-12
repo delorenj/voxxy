@@ -13,6 +13,7 @@ Environment:
   VOX_AUDIO_CACHE_DIR  directory for cached OGG blobs (default: /data/audio-cache)
   VOX_AUDIO_TTL_SECONDS  cache lifetime (default: 3600)
   VOX_ENGINES          comma-separated name=url pairs for remote engine sidecars
+  VOX_API_KEY          optional shared key protecting HTTP/MCP data-plane routes
   VOX_REF_AUDIO_MAX_SECONDS  max reference audio length (default 30)
   ELEVENLABS_API_KEY   enables the ElevenLabs fallback engine (optional)
   ELEVENLABS_DEFAULT_VOICE  default ElevenLabs voice id (default: Adam)
@@ -37,6 +38,7 @@ from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from app import audio as audio_codec
+from app.auth import ApiKeyAuthMiddleware
 from app import cache as audio_cache
 from app.engines import ElevenLabsEngine, EngineOrchestrator, PermanentEngineError, RemoteEngineClient, SynthResult
 from app.voices import VOICES_DIR, Voice, VoiceRepo
@@ -259,6 +261,7 @@ async def lifespan(app: FastAPI):
 # ---------- FastAPI ----------
 
 app = FastAPI(title="vox-tts", version="0.2.0", lifespan=lifespan)
+app.add_middleware(ApiKeyAuthMiddleware)
 
 
 @app.get("/healthz")
@@ -470,6 +473,15 @@ async def delete_voice(name: str):
 
 # ---------- FastMCP tools ----------
 
+def _default_voice() -> Optional[str]:
+    """Resolve the default voice from env, falling back to 'rick'.
+
+    Set VOX_DEFAULT_VOICE in the container env to change the fleet default.
+    Pass voice="" (empty string) to explicitly request voice-design mode.
+    """
+    return os.environ.get("VOX_DEFAULT_VOICE", "rick")
+
+
 @mcp.tool
 async def speak(
     text: str,
@@ -484,11 +496,14 @@ async def speak(
 
     Args:
         text: What to say.
-        voice: Name of a saved voice profile. Omit for voice-design mode.
+        voice: Name of a saved voice profile. Defaults to the service default
+            voice (rick). Pass empty string "" for voice-design mode.
         cfg: Classifier-free guidance scale (1.0-5.0).
         steps: Diffusion inference steps (higher = better quality, slower).
     """
     import base64
+    if voice is None:
+        voice = _default_voice()
     result = await _synthesize_wav(
         text=text, voice_name=voice, cfg=cfg, steps=steps,
     )
@@ -516,10 +531,13 @@ async def speak_url(
 
     Args:
         text: What to say.
-        voice: Name of a saved voice profile. Omit for voice-design mode.
+        voice: Name of a saved voice profile. Defaults to the service default
+            voice (rick). Pass empty string "" for voice-design mode.
         cfg: Classifier-free guidance scale (1.0-5.0).
         steps: Diffusion inference steps (higher = better quality, slower).
     """
+    if voice is None:
+        voice = _default_voice()
     resp = await _synthesize_and_cache(
         text=text, voice_name=voice, cfg=cfg, steps=steps,
     )

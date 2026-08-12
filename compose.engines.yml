@@ -54,7 +54,7 @@ services:
   voxxy-engine-vibevoice:
     build: ./engines/vibevoice
     container_name: voxxy-engine-vibevoice
-    restart: unless-stopped
+    restart: "no"
     environment:
       HF_HOME: /cache/huggingface
       # Memory-containment knobs. expandable_segments keeps peak usage

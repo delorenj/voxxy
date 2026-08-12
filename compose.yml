@@ -14,6 +14,8 @@ services:
       VOX_AUDIO_TTL_SECONDS: "3600"
       VOX_PUBLIC_BASE_URL: https://vox.delo.sh
       VOX_REF_AUDIO_MAX_SECONDS: "30"
+      VOX_API_KEY: ${VOX_API_KEY:-}
+      VOX_DEFAULT_VOICE: ${VOX_DEFAULT_VOICE:-rick}
       # Engine registry: ordered list of name=url pairs. Core tries them in
       # order; first success wins. ElevenLabs is always appended in-process
       # and self-disables without ELEVENLABS_API_KEY. Default stack assumes
