@@ -105,6 +105,41 @@ def test_synthesize_ogg_downloads_local_telegram_artifact_and_honors_rick(tmp_pa
     ]
 
 
+def test_vox_voice_env_pins_one_agent_against_shared_fleet_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``VOX_VOICE`` outranks the voice Hermes passes from ``tts.voice``.
+
+    Fleet agents share one ``config.yaml`` by symlink, so the passed voice
+    is the fleet default, not a per-call choice. Pinning ``VOX_VOICE`` in an
+    agent's systemd unit is what gives that agent its own voice.
+    """
+    module = _load_plugin_module()
+    calls: list[dict | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(json.loads(request.content) if request.content else None)
+        return httpx.Response(200, content=_wav_bytes(), headers={"content-type": "audio/wav"})
+
+    provider = module.VoxTTSProvider(
+        base_url="https://vox.example", transport=httpx.MockTransport(handler)
+    )
+
+    monkeypatch.setenv("VOX_VOICE", "mitch")
+    provider.synthesize("hello", str(tmp_path / "a.wav"), voice="rick", format="wav")
+    assert calls[-1] == {"text": "hello", "voice": "mitch"}
+    assert provider.default_voice() == "mitch"
+
+    # Blank env is treated as unset, not as a request for an empty voice.
+    monkeypatch.setenv("VOX_VOICE", "   ")
+    provider.synthesize("hello", str(tmp_path / "b.wav"), voice="rick", format="wav")
+    assert calls[-1] == {"text": "hello", "voice": "rick"}
+
+    monkeypatch.delenv("VOX_VOICE", raising=False)
+    provider.synthesize("hello", str(tmp_path / "c.wav"), voice="rick", format="wav")
+    assert calls[-1] == {"text": "hello", "voice": "rick"}
+
+
 def test_synthesize_wav_and_clean_upstream_error(tmp_path: Path) -> None:
     module = _load_plugin_module()
     wav = _wav_bytes()

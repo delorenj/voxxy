@@ -112,7 +112,7 @@ class VoxTTSProvider(TTSProvider):
         return voices
 
     def default_voice(self) -> Optional[str]:
-        return self._resolve_default_voice()
+        return self._env_voice() or self._resolve_default_voice()
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
@@ -143,7 +143,7 @@ class VoxTTSProvider(TTSProvider):
             raise VoxTTSProviderError("text is required for Vox synthesis")
 
         requested_format = self._normalize_format(format)
-        selected_voice = voice.strip() if isinstance(voice, str) and voice.strip() else self._resolve_default_voice()
+        selected_voice = self._resolve_voice(voice)
         payload: Dict[str, Any] = {"text": text}
         if selected_voice:
             payload["voice"] = selected_voice
@@ -216,6 +216,28 @@ class VoxTTSProvider(TTSProvider):
     def _resolve_default_voice(self) -> str:
         configured = self._default_voice or self._service_config().get("voice") or DEFAULT_VOICE
         return str(configured).strip() or DEFAULT_VOICE
+
+    @staticmethod
+    def _env_voice() -> Optional[str]:
+        """Per-process voice pin from ``VOX_VOICE``."""
+        return os.environ.get("VOX_VOICE", "").strip() or None
+
+    def _resolve_voice(self, requested: Optional[str]) -> str:
+        """Resolve the voice for one synthesis call.
+
+        ``VOX_VOICE`` wins on purpose. Most fleet agents share a single
+        ``config.yaml`` by symlink, so ``tts.voice`` is fleet-wide; pinning
+        the voice in an agent's systemd unit is the only way to give one
+        agent its own voice without forking that config. Nothing explicit
+        is being overridden — Hermes' ``text_to_speech_tool`` has no
+        per-call voice argument, so ``requested`` is itself just the
+        shared ``tts.voice`` config value.
+        """
+        if env_voice := self._env_voice():
+            return env_voice
+        if isinstance(requested, str) and requested.strip():
+            return requested.strip()
+        return self._resolve_default_voice()
 
     @staticmethod
     def _service_config() -> Dict[str, Any]:

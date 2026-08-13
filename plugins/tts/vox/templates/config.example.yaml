@@ -7,7 +7,9 @@ plugins:
 
 tts:
   provider: vox
-  # Hermes dispatch passes this top-level value to the provider.
+  # Hermes dispatch passes this top-level value to the provider. Agents that
+  # share this file by symlink share this voice; set VOX_VOICE in one agent's
+  # systemd unit to give just that agent its own voice.
   voice: rick
   # Vox's /synthesize-url endpoint produces a local OGG/Opus artifact, ready
   # for Telegram voice bubbles without a second local conversion.

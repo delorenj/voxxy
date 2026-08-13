@@ -8,8 +8,8 @@ registry rather than falling through to Edge.
 ## Behavior
 
 - reads `tts.vox.base_url` (default `https://vox.delo.sh`)
-- defaults to voice `rick` (`tts.voice` is passed by Hermes; `tts.vox.voice`
-  and then `rick` are provider fallbacks)
+- resolves the voice as `VOX_VOICE` → the voice Hermes passes (`tts.voice`) →
+  `tts.vox.voice` → `rick`
 - lists Vox voices from `GET /voices`
 - checks usable engine health via `GET /healthz`, without raising on failure
 - calls `POST /synthesize-url` for `ogg`/`opus`, downloads the returned
@@ -46,6 +46,23 @@ tts:
 
 For a protected deployment, put the secret in `VOX_API_KEY` (or
 `tts.vox.api_key`); it is sent as Bearer and `X-API-Key` authentication.
+
+## Per-agent voices on a shared config (`VOX_VOICE`)
+
+Most fleet agents symlink one `~/.hermes/config.yaml`, so `tts.voice` is a
+fleet-wide setting — changing it repaints every agent. `VOX_VOICE` pins one
+agent's voice without forking that config:
+
+```ini
+# ~/.config/systemd/user/hermes-<agent>-gateway.service.d/vox-voice.conf
+[Service]
+Environment=VOX_VOICE=mitch
+```
+
+`VOX_VOICE` deliberately outranks the voice Hermes passes in. Nothing explicit
+is being overridden: Hermes' `text_to_speech_tool` takes no per-call voice
+argument, so the value it passes is just the shared `tts.voice` default. A
+blank or whitespace-only `VOX_VOICE` is treated as unset.
 
 ## Canonical-name migration
 
