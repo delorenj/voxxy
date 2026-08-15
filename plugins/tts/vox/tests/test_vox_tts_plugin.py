@@ -140,6 +140,57 @@ def test_vox_voice_env_pins_one_agent_against_shared_fleet_config(
     assert calls[-1] == {"text": "hello", "voice": "rick"}
 
 
+def test_warns_when_fallback_engine_bypasses_the_voice_clone(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A non-cloning engine must not be able to answer silently.
+
+    The ElevenLabs fallback returns 200 with perfectly valid audio in a voice
+    that is not the requested one, so without this warning an agent speaks in
+    the wrong voice indefinitely and nothing in the stack objects.
+    """
+    module = _load_plugin_module()
+    wav = _wav_bytes()
+
+    def serve(engine: str):
+        return module.VoxTTSProvider(
+            base_url="https://vox.example",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    200, content=wav,
+                    headers={"content-type": "audio/wav", "x-vox-engine": engine},
+                )
+            ),
+        )
+
+    with caplog.at_level("WARNING"):
+        serve("elevenlabs").synthesize(
+            "hello", str(tmp_path / "fb.wav"), voice="carlin", format="wav"
+        )
+    assert "BYPASSED" in caplog.text, caplog.text
+    assert "carlin" in caplog.text and "elevenlabs" in caplog.text
+
+    # A real cloning engine is the normal path and must stay quiet.
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        serve("voxcpm").synthesize(
+            "hello", str(tmp_path / "ok.wav"), voice="carlin", format="wav"
+        )
+    assert caplog.records == []
+
+    # An absent header must not produce a false alarm.
+    caplog.clear()
+    provider = module.VoxTTSProvider(
+        base_url="https://vox.example",
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=wav, headers={"content-type": "audio/wav"})
+        ),
+    )
+    with caplog.at_level("WARNING"):
+        provider.synthesize("hello", str(tmp_path / "nohdr.wav"), voice="carlin", format="wav")
+    assert caplog.records == []
+
+
 def test_synthesize_wav_and_clean_upstream_error(tmp_path: Path) -> None:
     module = _load_plugin_module()
     wav = _wav_bytes()

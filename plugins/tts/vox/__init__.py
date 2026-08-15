@@ -7,6 +7,7 @@ falling through to the Edge fallback.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -18,6 +19,12 @@ from urllib.parse import urljoin
 import httpx
 
 from agent.tts_provider import TTSProvider
+
+logger = logging.getLogger(__name__)
+
+# Engines that synthesize from the voice's own reference audio. Anything else
+# served a request with some other voice entirely.
+CLONING_ENGINES = frozenset({"voxcpm", "vibevoice"})
 
 DEFAULT_BASE_URL = "https://vox.delo.sh"
 DEFAULT_VOICE = "rick"
@@ -183,6 +190,11 @@ class VoxTTSProvider(TTSProvider):
             data = response.json()
         except Exception as exc:
             raise VoxTTSProviderError("Vox /synthesize-url returned invalid JSON") from exc
+        if isinstance(data, dict):
+            self._warn_if_clone_bypassed(
+                data.get("engine") or response.headers.get("x-vox-engine"),
+                payload.get("voice"),
+            )
         audio_url = data.get("audio_url") if isinstance(data, dict) else None
         if not isinstance(audio_url, str) or not audio_url.strip():
             raise VoxTTSProviderError("Vox /synthesize-url returned no audio_url")
@@ -207,7 +219,38 @@ class VoxTTSProvider(TTSProvider):
             raise VoxTTSProviderError(
                 f"Vox /synthesize returned non-WAV audio (content-type: {content_type})"
             )
+        self._warn_if_clone_bypassed(
+            response.headers.get("x-vox-engine"), payload.get("voice")
+        )
         return response.content
+
+    @staticmethod
+    def _warn_if_clone_bypassed(engine: Optional[str], voice: Optional[Any]) -> None:
+        """Log loudly when synthesis came back in the wrong voice.
+
+        Vox falls back to ElevenLabs when every local engine is unavailable,
+        which keeps the agent talking during a GPU outage -- a reasonable
+        tradeoff, except that ElevenLabs ignores the reference audio and
+        answers in a generic voice. The request still returns 200 with valid
+        audio, so nothing downstream can tell that the clone was dropped, and
+        an agent can speak in the wrong voice indefinitely without a single
+        error being raised.
+
+        Observed in practice: voxcpm OOM'd against a GPU that ollama had
+        filled, every request silently fell through to ElevenLabs, and each
+        distinct voice came back sounding identical.
+        """
+        name = (engine or "").strip().lower()
+        if not name or name in CLONING_ENGINES:
+            return
+        logger.warning(
+            "vox: voice clone BYPASSED -- %r was synthesized by %r, which does "
+            "not use the voice's reference audio. Output is in the wrong voice. "
+            "Check `curl %s/healthz` and the GPU engines.",
+            voice or "<default>",
+            name,
+            DEFAULT_BASE_URL,
+        )
 
     def _resolve_base_url(self) -> str:
         configured = self._base_url or self._service_config().get("base_url") or os.environ.get("VOX_URL") or DEFAULT_BASE_URL
