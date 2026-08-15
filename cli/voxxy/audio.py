@@ -17,9 +17,17 @@ Design notes:
 - sample_rate default 24000 Hz matches voxcpm's output format and is the format
   that voices are stored in after upload. Sending a 24kHz mono WAV to the server's
   /voices endpoint means the server's own resample step is a no-op.
-- trim_seconds default 8.0 seconds matches the plan's `voice add --trim-seconds`
-  default. VibeVoice quality degrades on clips longer than ~10s; voxcpm accepts
-  up to 30s but doesn't benefit much past 8s for most voices.
+- trim_seconds default matches the server's own REF_AUDIO_MAX_SECONDS (30), so
+  `voice add` stops discarding reference audio the engine would have accepted.
+  The previous 8.0 default silently clipped every uploaded voice to roughly a
+  quarter of the usable length, which is why `rick` -- uploaded through the API
+  before this CLI existed, and still the best-sounding voice in the repo --
+  carries ~2x the actual speech of any voice added since.
+
+  Trimming per-engine here would be wrong: each engine already applies its own
+  cap server-side (VibeVoice trims to 10s, where its quality does degrade), and
+  a voice row feeds every engine. Upload the full 30s and let each engine take
+  what it wants; clipping in the CLI throws the audio away for all of them.
 """
 
 from __future__ import annotations
@@ -32,6 +40,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Mirrors the server's VOX_REF_AUDIO_MAX_SECONDS default (app/main.py).
+DEFAULT_TRIM_SECONDS = 30.0
 
 
 class FfmpegMissing(RuntimeError):
@@ -139,7 +150,7 @@ def _build_preprocess_argv(
     *,
     sample_rate: int = 24000,
     channels: int = 1,
-    trim_seconds: float = 8.0,
+    trim_seconds: float = DEFAULT_TRIM_SECONDS,
 ) -> list[str]:
     """Return the ffmpeg argv for a preprocess invocation.
 
@@ -163,7 +174,7 @@ def preprocess(
     *,
     sample_rate: int = 24000,
     channels: int = 1,
-    trim_seconds: float = 8.0,
+    trim_seconds: float = DEFAULT_TRIM_SECONDS,
 ) -> None:
     """Transcode src to a clean WAV file at dst.
 

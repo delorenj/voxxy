@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from voxxy.audio import _build_preprocess_argv
+from voxxy.audio import DEFAULT_TRIM_SECONDS, _build_preprocess_argv
 
 
 SRC = Path("/data/voices/rick.wav")
@@ -53,10 +53,16 @@ class TestBuildPreprocessArgv:
         assert argv[idx + 1] == "2"
 
     def test_default_trim_seconds(self) -> None:
-        """Default trim is 8.0 seconds."""
+        """Default trim matches the server's reference-audio cap, not less.
+
+        A CLI default below the server's REF_AUDIO_MAX_SECONDS silently
+        discards reference audio the engine would have used, and the loss is
+        invisible: the upload succeeds and the voice simply sounds worse.
+        """
         argv = _build_preprocess_argv(SRC, DST)
         idx = argv.index("-t")
-        assert float(argv[idx + 1]) == pytest.approx(8.0)
+        assert float(argv[idx + 1]) == pytest.approx(DEFAULT_TRIM_SECONDS)
+        assert DEFAULT_TRIM_SECONDS == pytest.approx(30.0)
 
     def test_custom_trim_seconds(self) -> None:
         argv = _build_preprocess_argv(SRC, DST, trim_seconds=30.0)

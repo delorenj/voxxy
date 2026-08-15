@@ -18,7 +18,13 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from voxxy.audio import AudioProbeError, FfmpegMissing, probe, preprocess
+from voxxy.audio import (
+    DEFAULT_TRIM_SECONDS,
+    AudioProbeError,
+    FfmpegMissing,
+    probe,
+    preprocess,
+)
 from voxxy.client import VoxClient, VoxNotFound, VoxUnreachable, VoxValidationError
 from voxxy.config import load_config
 
@@ -116,7 +122,10 @@ def add(
     display_name: str | None = typer.Option(None, "-d", "--display-name"),
     tags: str | None = typer.Option(None, "-t", "--tags", help="Comma-separated."),
     engines: str = typer.Option("voxcpm,vibevoice", "-e", "--engine", help="Comma-separated list of engines to populate refs for."),
-    trim_seconds: float = typer.Option(8.0, "-T", "--trim-seconds"),
+    trim_seconds: float = typer.Option(
+        DEFAULT_TRIM_SECONDS, "-T", "--trim-seconds",
+        help="Seconds of reference audio to keep; matches the server cap.",
+    ),
     sample_rate: int = typer.Option(24000, "-R", "--sample-rate"),
     no_prompt: bool = typer.Option(False, "-N", "--no-prompt", help="Skip interactive prompts; --name required."),
 ) -> None:
