@@ -1,24 +1,10 @@
 voices/**/*
 agents/**/*runtime*
 audio-cache/
-.env
-
-# Python bytecode + virtualenvs
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-
-# Dev-only symlinks for local skill discovery; not portable across machines.
-.agents/skills/google-agent-skills
-.claude/skills
 
 # voxxy CLI artifacts
 .voxxy.state.json
-cli/.venv/
-cli/**/__pycache__/
 cli/**/*.egg-info/
-_bmad/_memory/
 
 # Secrets — .env is materialized by `op inject -i .env.op > .env` on mise enter.
 # NEVER commit it. .env.op holds only 1Password references or safe literals and IS committed.
@@ -26,5 +12,5 @@ _bmad/_memory/
 .env.*
 !.env.op
 
-# Hermes agent runtime — pure-local state, never tracked (degit-runtime).
+# Hermes agent runtime — pure-local state, never tracked.
 agents/hermes/*/runtime/

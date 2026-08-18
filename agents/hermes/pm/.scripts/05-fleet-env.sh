@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 # Ensure a single shared fleet source-of-truth file exists.
+
+if [[ "${SKIP_HOST_STATE:-0}" == "1" ]]; then
+  printf '%s\n' '[05] fleet env — DEFERRED (SKIP_HOST_STATE=1)' >&2
+  exit 0
+fi
+
 # shellcheck source=_lib.sh
 source "$(dirname "$0")/_lib.sh"
 load_role_env

@@ -31,6 +31,22 @@ VOX_COMPOSE_CORE = "-f compose.yml"
 # Stack lifecycle — alias to `voxxy daemon *`
 # ---------------------------------------------------------------------------
 _.path = [".mise/scripts", "agents/hermes/pm", "agents/hermes/pm/hermes"]
+
+# This block will handle the linking of
+# agent files to the main AGENTS.md file.
+#
+# TODO: Ensure this works for all levels of nesting.
+# i.e. All linked agent files MUST be siblings at
+# any given level of nesting.
+[[hooks.enter]]
+script = "'{{config_root}}/.mise/scripts/link-agentfiles.sh'"
+[[hooks.enter]]
+script = "python3 '{{config_root}}/.mise/scripts/provision-packs.py'"
+[[hooks.enter]]
+script = "python3 '{{config_root}}/.mise/scripts/sync-skills.py' --scope project"
+[[hooks.enter]]
+script = "'{{config_root}}/.mise/scripts/materialize-env.sh'"
+
 [tasks.up]
 description = "Start the full stack (core + engines). Alias for `voxxy daemon start`."
 run = "voxxy daemon start"
@@ -122,6 +138,27 @@ for f in migrations/*.sql; do
 done
 '''
 
+[[watch_files]]
+patterns = ["AGENTS.md"]
+task = "link:agentfiles"
+
+[[watch_files]]
+patterns = [".agents/skills.json"]
+task = "skills:sync"
+
+[tasks."link:agentfiles"]
+description = "Symlink all agent files to AGENTS.md"
+run = "'{{config_root}}/.mise/scripts/link-agentfiles.sh'"
+
+[tasks."skills:sync"]
+description = "Sync skills from manifest to local CLI dirs"
+depends = ["skills:provision:packs"]
+run = "python3 '{{config_root}}/.mise/scripts/sync-skills.py' --scope project"
+
+[tasks."skills:provision:packs"]
+description = "Provision every Skillex pack declared in .agents/skills.json"
+run = "python3 '{{config_root}}/.mise/scripts/provision-packs.py'"
+
 # >>> mise-versioning >>>  (managed block — do not edit by hand; re-run init to update)
 [tasks."version"]
 description = "Print the current version (vX.Y.Z)"
@@ -190,23 +227,3 @@ if ! command -v voxxy >/dev/null 2>&1; then
 fi
 exec voxxy daemon install --completions
 '''
-
-# This block will handle the linking of
-# agent files to the main AGENTS.md file.
-#
-# TODO: Ensure this works for all levels of nesting.
-# i.e. All linked agent files MUST be siblings at
-# any given level of nesting.
-[hooks]
-enter = [
-  "{{config_root}}/.mise/scripts/link-agentfiles.sh",
-  "op inject -i .env.op > .env",
-]
-
-[[watch_files]]
-patterns = ["AGENTS.md"]
-task = "link-agentfiles"
-
-[tasks.link-agentfiles]
-description = "Symlink all agent files to AGENTS.md"
-run = "{{config_root}}/.mise/scripts/link-agentfiles.sh"

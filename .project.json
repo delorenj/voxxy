@@ -8,12 +8,19 @@
     "workspace": "",
     "identifier": "VOXPM",
     "board_id": "b757648f-0067-482c-84b5-947158a7af3f",
-    "board_url": "https://plane.delo.sh/33god/projects/b757648f-0067-482c-84b5-947158a7af3f/issues/"
+    "state": "linked"
   },
   "agents": {
     "voxxy-pm": {
       "role": "pm",
       "role_dir": "agents/hermes/pm"
+    }
+  },
+  "automation": {
+    "reconcile": {
+      "enabled": false,
+      "grace_hours": 0,
+      "auto_review": true
     }
   }
 }

@@ -1,13 +1,55 @@
 installation:
-  version: 6.0.0-alpha.23
+  version: 6.11.1-next.23
   installDate: 2026-03-08T19:53:52.586Z
-  lastUpdated: 2026-03-08T19:53:52.586Z
+  lastUpdated: 2026-08-17T19:51:07.940Z
+  installShims: true
 modules:
-  - core
-  - bmb
-  - bmm
-  - cis
-  - custom
+  - name: core
+    version: 6.11.1-next.23
+    installDate: 2026-08-17T19:51:03.822Z
+    lastUpdated: 2026-08-17T19:51:07.936Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
+  - name: bmb
+    version: main
+    installDate: 2026-08-17T19:51:03.834Z
+    lastUpdated: 2026-08-17T19:51:07.937Z
+    source: external
+    npmPackage: bmad-builder
+    repoUrl: https://github.com/bmad-code-org/bmad-builder
+    channel: next
+    sha: 38df19573f493c5025c7efce331debe8498832c1
+  - name: bmm
+    version: 6.11.1-next.23
+    installDate: 2026-08-17T19:51:03.866Z
+    lastUpdated: 2026-08-17T19:51:07.937Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
+  - name: cis
+    version: main
+    installDate: 2026-08-17T19:51:03.874Z
+    lastUpdated: 2026-08-17T19:51:07.938Z
+    source: external
+    npmPackage: bmad-creative-intelligence-suite
+    repoUrl: https://github.com/bmad-code-org/bmad-module-creative-intelligence-suite
+    channel: next
+    sha: 0e4ff9233a792db1a1cd00f22a482f338168cdc3
+  - name: custom
+    version: null
+    installDate: 2026-03-08T19:53:52.586Z
+    lastUpdated: 2026-08-17T19:51:07.939Z
+    source: unknown
+    npmPackage: null
+    repoUrl: null
+  - name: skf
+    version: null
+    installDate: 2026-08-17T19:51:03.909Z
+    lastUpdated: 2026-08-17T19:51:07.940Z
+    source: unknown
+    npmPackage: null
+    repoUrl: null
 ides:
   - claude-code
   - codex
