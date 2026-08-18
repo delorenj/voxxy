@@ -3,6 +3,7 @@
 - HTTP API: POST /synthesize → audio/wav  (engine chain, returns winning bytes)
 - HTTP API: POST /synthesize-url → JSON   (engine fallback + URL return)
 - Audio cache: GET /audio/{id}.ogg        (Telegram-ready OGG/Opus)
+- Sink relay: /sink/{key}/...             (play on the human's machine, not the caller's)
 - MCP at /mcp/ (streamable HTTP) for Hermes/OpenClaw/Claude Code
 - Voice profile CRUD at /voices
 - Health check at /healthz
@@ -14,6 +15,7 @@ Environment:
   VOX_AUDIO_TTL_SECONDS  cache lifetime (default: 3600)
   VOX_ENGINES          comma-separated name=url pairs for remote engine sidecars
   VOX_API_KEY          optional shared key protecting HTTP/MCP data-plane routes
+  VOX_DEFAULT_SINK     default sink name for the speak_sink MCP tool (optional)
   VOX_REF_AUDIO_MAX_SECONDS  max reference audio length (default 30)
   ELEVENLABS_API_KEY   enables the ElevenLabs fallback engine (optional)
   ELEVENLABS_DEFAULT_VOICE  default ElevenLabs voice id (default: Adam)
@@ -33,13 +35,14 @@ from typing import Callable, Optional
 
 import soundfile as sf
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field
 
 from app import audio as audio_codec
 from app.auth import ApiKeyAuthMiddleware
 from app import cache as audio_cache
+from app import sink as sink_relay
 from app.engines import ElevenLabsEngine, EngineOrchestrator, PermanentEngineError, RemoteEngineClient, SynthResult
 from app.voices import VOICES_DIR, Voice, VoiceRepo
 
@@ -55,6 +58,11 @@ REF_AUDIO_MAX_SECONDS = float(os.environ.get("VOX_REF_AUDIO_MAX_SECONDS", "30"))
 _repo: VoiceRepo | None = None
 _engine: EngineOrchestrator | None = None
 _sweep_task: asyncio.Task | None = None
+
+# Sink listeners are plain in-process state, not a lifespan resource: a sink is
+# a live attention channel, so there is nothing to open at boot and nothing
+# worth persisting across a restart (see app/sink.py).
+_sinks = sink_relay.SinkRegistry()
 
 
 # ---------- engine chain builder ----------
@@ -102,6 +110,40 @@ class SynthesizeUrlResponse(BaseModel):
     duration_s: Optional[float] = None
     bytes: int
     format: str = "ogg_opus"
+
+
+class SinkPlayRequest(BaseModel):
+    """Envelope pushed to a sink's listeners.
+
+    ``audio_url`` is the only required field because the listener fetches the
+    bytes itself from the public audio cache; everything else is metadata the
+    listener may log or display.
+    """
+
+    audio_url: str = Field(..., description="Fetchable audio URL for the listener to play")
+    text: Optional[str] = Field(None, description="What was said, for the listener's log")
+    voice: Optional[str] = None
+    engine: Optional[str] = None
+    duration_s: Optional[float] = None
+    format: str = "ogg_opus"
+
+
+class SinkPlayResponse(BaseModel):
+    """Result of a publish. ``delivered == 0`` means nobody was listening.
+
+    Callers use this to decide whether to fall back to playing locally, which is
+    why an unlistened sink is a 200 with a zero count rather than an error: not
+    reaching a sink is an expected, recoverable outcome.
+    """
+
+    key: str
+    delivered: int
+    audio_url: Optional[str] = None
+
+
+class SinkStatus(BaseModel):
+    key: str
+    listeners: int
 
 
 class VoiceOut(BaseModel):
@@ -397,6 +439,99 @@ async def get_audio(cache_id: str) -> FileResponse:
     )
 
 
+# ---------- sink relay ----------
+
+def _validated_key(key: str) -> str:
+    """Validate a sink key, translating the domain error into a 422."""
+    try:
+        return sink_relay.validate_key(key)
+    except sink_relay.SinkKeyError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+
+@app.get("/sink/{key}", response_model=SinkStatus)
+async def sink_status(key: str) -> SinkStatus:
+    """Report how many listeners a sink currently has.
+
+    Cheap enough to probe before every synthesis, which is the point: the caller
+    checks this first so it can synthesize down the *right* path -- WAV inline
+    for local playback, or OGG-to-cache when a sink will fetch it -- instead of
+    synthesizing twice when it guesses wrong.
+    """
+    return SinkStatus(key=_validated_key(key), listeners=_sinks.listener_count(key))
+
+
+@app.post("/sink/{key}/play", response_model=SinkPlayResponse)
+async def sink_play(key: str, req: SinkPlayRequest) -> SinkPlayResponse:
+    """Push an already-synthesized audio URL to a sink's listeners.
+
+    Deliberately thin so anything that can POST JSON -- Node-RED, n8n, a shell
+    script, an agent -- can reach the human's speakers without going through the
+    CLI.
+    """
+    _validated_key(key)
+    delivered = _sinks.publish(key, req.model_dump())
+    return SinkPlayResponse(key=key, delivered=delivered, audio_url=req.audio_url)
+
+
+@app.post("/sink/{key}/say", response_model=SinkPlayResponse)
+async def sink_say(key: str, req: SynthesizeRequest, request: Request) -> SinkPlayResponse:
+    """Synthesize and push to a sink in one call.
+
+    The one-liner form for fleet callers:
+    ``curl -X POST $VOX/sink/delo-macbook/say -d '{"text":"build done"}'``.
+    Synthesis runs even when nobody is listening so the response still carries a
+    usable ``audio_url`` -- the caller can fall back to playing it itself.
+    """
+    _validated_key(key)
+    try:
+        resp = await _synthesize_and_cache(
+            text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
+            request=request,
+        )
+    except PermanentEngineError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("sink_say failed")
+        raise HTTPException(500, f"synthesis failed: {exc}") from exc
+
+    delivered = _sinks.publish(key, {
+        "audio_url": resp.audio_url,
+        "text": req.text,
+        "voice": req.voice,
+        "engine": resp.engine,
+        "duration_s": resp.duration_s,
+        "format": resp.format,
+    })
+    return SinkPlayResponse(key=key, delivered=delivered, audio_url=resp.audio_url)
+
+
+@app.get("/sink/{key}/events")
+async def sink_events(key: str) -> StreamingResponse:
+    """Subscribe to a sink as an SSE stream. Held open until the client leaves.
+
+    The listener is registered for the life of the stream and torn down when the
+    generator is closed, which Starlette does on client disconnect.
+    """
+    _validated_key(key)
+
+    async def stream():
+        try:
+            async with _sinks.subscribe(key) as queue:
+                async for frame in sink_relay.event_stream(_sinks, key, queue):
+                    yield frame
+        except sink_relay.SinkCapacityError as exc:
+            yield sink_relay.sse_frame("error", {"message": str(exc)})
+        except asyncio.CancelledError:  # normal client disconnect
+            raise
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers=sink_relay.SSE_HEADERS,
+    )
+
+
 @app.get("/voices", response_model=list[VoiceOut])
 async def list_voices() -> list[VoiceOut]:
     assert _repo is not None
@@ -542,6 +677,55 @@ async def speak_url(
         text=text, voice_name=voice, cfg=cfg, steps=steps,
     )
     return resp.model_dump()
+
+
+@mcp.tool
+async def speak_sink(
+    text: str,
+    sink: Optional[str] = None,
+    voice: Optional[str] = None,
+    cfg: float = 2.0,
+    steps: int = 10,
+) -> dict:
+    """Speak to the human wherever they are, instead of into the host's speakers.
+
+    An agent running on a server has no speakers anyone is sitting in front of.
+    This routes the audio to a named *sink* -- the machine the human is actually
+    at, which holds a listening connection (``voxxy listen``).
+
+    ``delivered: 0`` means no machine was listening on that sink; the returned
+    ``audio_url`` is still valid, so fall back to delivering it another way
+    (Telegram, a message) rather than assuming the human heard it.
+
+    Args:
+        text: What to say.
+        sink: Sink name. Defaults to the service default (VOX_DEFAULT_SINK).
+        voice: Saved voice profile. Defaults to the service default voice.
+        cfg: Classifier-free guidance scale (1.0-5.0).
+        steps: Diffusion inference steps (higher = better quality, slower).
+    """
+    key = sink or os.environ.get("VOX_DEFAULT_SINK", "")
+    if not key:
+        return {"error": "no sink given and VOX_DEFAULT_SINK is unset"}
+    try:
+        sink_relay.validate_key(key)
+    except sink_relay.SinkKeyError as exc:
+        return {"error": str(exc)}
+
+    if voice is None:
+        voice = _default_voice()
+    resp = await _synthesize_and_cache(
+        text=text, voice_name=voice, cfg=cfg, steps=steps,
+    )
+    delivered = _sinks.publish(key, {
+        "audio_url": resp.audio_url,
+        "text": text,
+        "voice": voice,
+        "engine": resp.engine,
+        "duration_s": resp.duration_s,
+        "format": resp.format,
+    })
+    return {"sink": key, "delivered": delivered, **resp.model_dump()}
 
 
 @mcp.tool

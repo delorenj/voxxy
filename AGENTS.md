@@ -25,7 +25,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Transports exposed by core:
 
 - **HTTP** (`POST /synthesize` → WAV bytes, `POST /synthesize-url` → OGG/Opus URL, `/voices` CRUD, `/audio/<id>.ogg` cache, `/healthz` with per-engine rollup)
-- **MCP** at `/mcp/` (FastMCP streamable HTTP) for Hermes / OpenClaw / Claude Code agents — tools: `speak`, `speak_url`, `list_voices_tool`
+- **MCP** at `/mcp/` (FastMCP streamable HTTP) for Hermes / OpenClaw / Claude Code agents — tools: `speak`, `speak_url`, `speak_sink`, `list_voices_tool`
+- **Sink relay** at `/sink/<key>/...` — routes audio to the machine the human is at, not the caller's sound card
 - **Node-RED** via the sibling `node-red-contrib-vox/` package (thin HTTP wrapper)
 
 Voice profile metadata lives in a host postgres DB (`vox`); reference WAV bytes live on disk under `./voices/` (bind-mounted to core at `/data/voices`, read by core and shipped inline as base64 to engines — engines are stateless, no shared volume); transcoded OGG/Opus delivery blobs live under `./audio-cache/` (bind-mounted to `/data/audio-cache`, TTL-swept).
@@ -64,6 +65,12 @@ voxxy speak --voice morgan "hi"
 voxxy speak --raw "hi" > out.wav                 # WAV to stdout (pipe friendly)
 voxxy speak --out /tmp/foo.ogg "hi"              # OGG/Opus via /synthesize-url
 voxxy speak --via big-chungus "hi"               # synth remote, play local (SSH via-mode)
+voxxy speak --sink delo-macbook "hi"             # play on the machine listening on that sink
+
+# Sinks — audio follows the human, not the process
+voxxy listen --key delo-macbook                  # on the machine you're at: become a sink
+voxxy sink status delo-macbook                   # how many machines are listening
+export VOX_SINK=delo-macbook                     # then every `voxxy speak` here routes there
 
 # Service health + logs + version
 voxxy health                                     # /healthz with per-engine roll-up; exit code reflects status
@@ -140,6 +147,25 @@ There is no test suite, linter config, or CI in-repo yet. Don't invent commands 
 - `speak` / `POST /synthesize` — returns raw WAV bytes inline. Routes through the engine chain (not single-engine anymore). Use when an agent needs bytes to process locally (splice, analyze, loop).
 - `speak_url` / `POST /synthesize-url` — runs the engine chain, transcodes WAV → OGG/Opus (`app/audio.py` via ffmpeg: libopus, 32 kbps, 48 kHz mono, VoIP preset), writes to the disk cache (`app/cache.py`), returns `{audio_url, engine, duration_s, bytes}` and an `X-Vox-Engine` header. This is the Telegram/Discord/HA/browser-ready path.
 
+**Sink relay** (`app/sink.py`). A process on the stack host has no speakers the human is
+in front of, so `voxxy speak` in an ssh session / zellij pane / systemd agent plays into an
+empty room. A *sink* is a named destination the human owns: `voxxy listen` holds an SSE
+connection to `GET /sink/<key>/events`, and any caller POSTs an `audio_url` to
+`POST /sink/<key>/play` (or text to `/sink/<key>/say` for synth+push in one call). The
+listener fetches the OGG itself from the public `/audio/<id>.ogg` route, so only a JSON
+envelope crosses the relay.
+
+Deliberately a server relay and **not** an ssh reverse tunnel: a tunnel dies with the ssh
+connection but a zellij session outlives it, so port-based env in that pane goes stale on
+reconnect. A sink key is a stable identity, and it reaches hosts with no ssh path back.
+
+`_sinks: SinkRegistry` is a module-level `dict[str, set[asyncio.Queue]]` — *not* a lifespan
+resource, because a sink is a live attention channel with nothing to open at boot and
+nothing worth persisting. `publish()` returns a delivery count rather than queueing:
+`speak` probes `GET /sink/<key>` before synthesizing and falls back to local playback when
+the count is 0, so the text is synthesized exactly once on whichever path it takes. Queues
+are bounded and evict **oldest** on overflow — stale speech is worse than no speech.
+
 **Audio cache lifecycle.** `app/cache.py` writes `<uuid>.ogg` under `VOX_AUDIO_CACHE_DIR`, returns an opaque hex id, and runs a background sweep task every `VOX_AUDIO_SWEEP_INTERVAL` (default 300s) to delete entries older than `VOX_AUDIO_TTL_SECONDS` (default 3600s). The cache is write-once, fetch-once, not a CDN. Any `cache_id` that isn't pure hex returns 404 (path-traversal guard). Served via `GET /audio/{cache_id}.ogg` — Telegram's servers fetch this directly when an agent passes the URL to `sendVoice` with `asVoice: true`.
 
 **Lifespan nesting matters.** `lifespan()` in `main.py` wraps `mcp_app.lifespan(app)` inside its own `try/finally` — without this, FastMCP's task group never boots and the MCP transport silently 500s. Preserve this structure if you touch startup.
@@ -172,6 +198,9 @@ Both engines share the same shape and are independently buildable / runnable.
 - Python 3.12 only across core and every engine (`requires-python = ">=3.12, <3.13"`). `uv` provisions the interpreter inside each image.
 - **Core has no `torch` dep.** Don't add one. Core runs on `python:3.12-slim` and an accidental CUDA pull re-balloons the image back to ~6 GB.
 - Engine `torch` / `torchaudio` come from `pytorch-cu124` (explicit uv index in `engines/<name>/pyproject.toml`). Don't let them drift to PyPI wheels — CPU-only wheels will "work" locally and then fail at model load in the container.
+- **SSE through Cloudflare needs help.** `app/sink.py:SSE_HEADERS` sets `Cache-Control: no-cache, no-transform` + `X-Accel-Buffering: no`, and `event_stream` emits a `: ping` comment every 20 s. Drop any of these and the stream is either buffered into uselessness or reaped as idle. Verified live through the CF tunnel.
+- **`voxxy listen` needs ffmpeg on the listening machine.** The relay ships OGG/Opus (what the cache already stores); CoreAudio has no Opus decoder, so `afplay` would refuse it. `cli/voxxy/playback.py:decode_to_wav` normalizes to WAV first — one path for every platform. Don't "optimize" it away by handing the OGG straight to the player.
+- Playback helpers live in `cli/voxxy/playback.py`, shared by `speak` and `listen`. `commands/speak.py` re-exports the underscore names (`_play_wav`, …) so pre-split imports and tests keep working.
 - The MCP tool that lists voices is named `list_voices_tool` in Python but surfaces as `vox:list_voices` — FastMCP strips the `_tool` suffix convention; keep it when adding new tools.
 - `prompt_text` on a voice row switches voxcpm generation from "voice clone" mode to "Ultimate Cloning" mode (uses `prompt_wav_path` + `prompt_text` together). Only set it when you have an accurate transcript of the reference audio. VibeVoice ignores `prompt_text` entirely.
 - `voices/**/*` is gitignored — only `voices/rick.wav` (the seed) is tracked. Don't commit uploaded voices.
@@ -198,4 +227,7 @@ Both engines share the same shape and are independently buildable / runnable.
 - **ElevenLabs fallback never engages** → `ELEVENLABS_API_KEY` unset in the core container env. `GET /healthz` reports per-engine availability; use it to confirm before debugging further.
 - **All engines show unavailable in `/healthz`** → compose network issue or engine sidecars didn't start. `voxxy daemon status` (or `docker ps | grep voxxy`) should show core + every engine in `VOX_ENGINES`. Check `voxxy engine logs <name>` for startup errors.
 - **Core routes to an engine that isn't there** → `VOX_ENGINES` lists it but the sidecar isn't running. Either start it (`voxxy daemon start` / `mise run up:engines`) or drop it via `voxxy engine disable <name>`.
+- **`voxxy speak` in an ssh session says "nothing listening on sink X"** → nothing is running `voxxy listen --key X` on the machine you're at, or it's pointed at a different `VOX_URL`. `voxxy sink status X` from both ends confirms which.
+- **`voxxy listen` connects but never plays** → check ffmpeg is on PATH there; the listener logs `playback failed: ffmpeg not found`. Under launchd/systemd the unit's PATH is not your shell's — the shipped units in `scripts/` set it explicitly.
+- **Sink listener reconnect-loops with 404** → normal during a `voxxy daemon restart` (Traefik has no backend for a few seconds). A *persistent* 404 means the deployed core predates the sink routes; rebuild it.
 - **`/audio/<id>.ogg` returns 404 shortly after synthesis** → cache TTL expired (`VOX_AUDIO_TTL_SECONDS`), or the id had non-hex chars (path-traversal guard). Check `docker exec vox ls -la /data/audio-cache/`.

@@ -14,6 +14,12 @@ Behavior modes (mirroring the bash original):
   the classic ``voxxy speak --raw "hi" > out.wav`` and
   ``ssh host voxxy speak --raw "hi" | paplay`` patterns.
 - **out FILE**: fetch OGG (via ``/synthesize-url``) and save to file.
+- **sink**: in play mode, when a sink is configured *and* something is
+  listening on it, the audio is delivered to that machine instead of this
+  one's sound card. This is the answer to "I'm ssh'd into the server and I
+  want to hear this at my desk": set ``VOX_SINK=<name>`` once in the remote
+  shell's rc and every ``voxxy speak`` there follows you home. ``--raw`` and
+  ``--out`` produce bytes for the caller, so they ignore the sink entirely.
 
 ``--via HOST`` shells out to ``ssh HOST voxxy speak --raw`` with the text
 piped on stdin. This preserves the remote-synth + local-play pattern from
@@ -32,7 +38,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -47,6 +52,19 @@ from voxxy.client import (
     VoxValidationError,
 )
 from voxxy.config import load_config
+# Re-exported (underscore names included) so `from voxxy.commands.speak import
+# _play_wav` keeps working for callers and tests written before the split.
+from voxxy.playback import (  # noqa: F401
+    _STDIN_WAV_PLAYERS,
+    _default_player,
+    _is_ssh_session,
+    _play_wav,
+    _play_wav_via_file,
+    _pulseaudio_forwarded,
+    PlaybackError,
+    play_encoded,
+    resolve_player,
+)
 
 console = Console(stderr=True)  # progress/status → stderr, keep stdout clean for --raw
 
@@ -90,6 +108,15 @@ def speak(
         None, "-P", "--player",
         help="Local audio player binary. Defaults to $VOX_PLAYER or 'paplay'.",
     ),
+    sink: Optional[str] = typer.Option(
+        None, "-s", "--sink",
+        help="Play on the machine listening on this sink instead of here. "
+             "Defaults to $VOX_SINK or config.default_sink.",
+    ),
+    no_sink: bool = typer.Option(
+        False, "--no-sink",
+        help="Ignore any configured sink and play on this machine's speakers.",
+    ),
     cfg_value: float = typer.Option(2.0, "-c", "--cfg", min=1.0, max=5.0),
     steps: int = typer.Option(10, "-S", "--steps", min=1, max=50),
 ) -> None:
@@ -103,6 +130,7 @@ def speak(
       voxxy speak --raw "hi" > out.wav
       voxxy speak --via big-chungus "hi"
       voxxy speak --out /tmp/voice.ogg "hi"
+      voxxy speak --sink delo-macbook "hi"   # play on the machine at my desk
     """
     # Resolve configuration with env overrides (env wins over config, flags win
     # over env). Matches the bash original's precedence.
@@ -110,7 +138,10 @@ def speak(
     voice_name = voice or os.environ.get("VOX_VOICE") or cfg.default_voice
     base_url = url or os.environ.get("VOX_URL") or cfg.default_url
     via_host = via or os.environ.get("VOX_REMOTE_HOST") or None
-    player_bin = player or os.environ.get("VOX_PLAYER") or _default_player()
+    player_bin = resolve_player(player)
+    sink_key = None if no_sink else (
+        sink or os.environ.get("VOX_SINK") or cfg.default_sink or None
+    )
 
     # Resolve text: args > stdin (non-TTY) > error.
     if text:
@@ -162,6 +193,10 @@ def speak(
     try:
         if mode == "out":
             _speak_to_file(client, text_str, voice_name, cfg_value, steps, out)
+        elif mode == "play" and sink_key and _speak_to_sink(
+            client, sink_key, text_str, voice_name, cfg_value, steps, player_bin
+        ):
+            pass  # delivered to (or played on behalf of) the sink
         else:
             wav_bytes = _fetch_wav(client, text_str, voice_name, cfg_value, steps)
             if mode == "raw":
@@ -260,157 +295,59 @@ def _speak_to_file(
     )
 
 
-def _is_ssh_session() -> bool:
-    """Return True if we appear to be running inside an SSH session."""
-    return any(
-        var in os.environ
-        for var in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
+def _speak_to_sink(
+    client: VoxClient, sink_key: str, text: str, voice: str | None,
+    cfg_value: float, steps: int, player_bin: str,
+) -> bool:
+    """Try to deliver this utterance to `sink_key`. Return False to play locally.
+
+    Probing listener count *before* synthesizing is what keeps this cheap: with
+    a listener we go down the OGG-to-cache path (the sink fetches the URL); with
+    none we return False untouched and the caller takes the normal inline-WAV
+    path. Either way the text is synthesized exactly once.
+
+    A sink that goes away between the probe and the publish is the one case that
+    still costs us: we already have the OGG, so we fetch and play it here rather
+    than re-synthesizing.
+
+    Never fatal. A broken sink must degrade to "you heard it on the wrong
+    machine", never to "you didn't hear it at all".
+    """
+    try:
+        status = client.sink_status(sink_key)
+    except VoxError as exc:
+        console.print(f"[yellow]sink {sink_key} unreachable ({exc}); playing here[/yellow]")
+        return False
+
+    if status.listeners == 0:
+        console.print(
+            f"[yellow]nothing listening on sink '{sink_key}'; playing here[/yellow]"
+        )
+        return False
+
+    resp = client.synthesize_url(text=text, voice=voice, cfg=cfg_value, steps=steps)
+    result = client.sink_play(
+        sink_key, resp.audio_url,
+        text=text, voice=voice, engine=resp.engine, duration_s=resp.duration_s,
     )
 
-
-def _pulseaudio_forwarded() -> str | None:
-    """Detect a forwarded PulseAudio server common in SSH sessions.
-
-    Returns the ``PULSE_SERVER`` value to use, or *None* if no forwarding
-    is detected.  Checks, in order:
-
-    1. ``PULSE_SERVER`` already set in the environment (trust it).
-    2. TCP port 4713 open on localhost (the standard PulseAudio TCP port
-       often forwarded with ``ssh -R 4713:localhost:4713``).
-    """
-    if os.environ.get("PULSE_SERVER"):
-        return os.environ["PULSE_SERVER"]
-
-    if not _is_ssh_session():
-        return None
-
-    try:
-        with socket.create_connection(("127.0.0.1", 4713), timeout=0.3):
-            return "127.0.0.1:4713"
-    except OSError:
-        pass
-
-    return None
-
-
-# Players that accept a raw WAV stream on stdin with no arguments. Anything else
-# (afplay on macOS, etc.) is handed a temp file path instead.
-_STDIN_WAV_PLAYERS = {"paplay", "pw-play", "aplay"}
-
-
-def _default_player() -> str:
-    """Platform-appropriate default audio player.
-
-    macOS ships ``afplay`` (CoreAudio, needs no sound server); Linux desktops
-    have ``paplay`` (PulseAudio/PipeWire). ``$VOX_PLAYER`` overrides either.
-    """
-    if sys.platform == "darwin":
-        return "afplay"
-    return "paplay"
-
-
-def _play_wav_via_file(wav_bytes: bytes, player_bin: str) -> None:
-    """Play via a temp WAV file, for players that can't read stdin (afplay).
-
-    No PulseAudio env dance — these players talk to the OS audio stack directly.
-    """
-    tmp = tempfile.NamedTemporaryFile(prefix="voxxy-", suffix=".wav", delete=False)
-    try:
-        tmp.write(wav_bytes)
-        tmp.flush()
-        tmp.close()
-        proc = subprocess.run([player_bin, tmp.name], check=False)
-        if proc.returncode != 0:
-            typer.secho(
-                f"{player_bin} exited with {proc.returncode}",
-                fg=typer.colors.YELLOW, err=True,
-            )
-    finally:
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-
-
-def _play_wav(wav_bytes: bytes, player_bin: str) -> None:
-    if not shutil.which(player_bin):
-        typer.secho(
-            f"{player_bin} not found; use --raw and pipe the WAV yourself",
-            fg=typer.colors.RED, err=True,
+    if result.delivered > 0:
+        where = f"{result.delivered} listeners" if result.delivered > 1 else "listener"
+        console.print(
+            f"[green]→[/green] {sink_key} ({where}, engine=[cyan]{resp.engine}[/cyan])"
         )
-        raise typer.Exit(code=127)
+        return True
 
-    # File-based players (afplay, ...) can't consume stdin: write a temp WAV and
-    # pass its path. The stdin + PulseAudio path below is for paplay and friends.
-    if os.path.basename(player_bin) not in _STDIN_WAV_PLAYERS:
-        _play_wav_via_file(wav_bytes, player_bin)
-        return
-
-    env = os.environ.copy()
-    pa_server = _pulseaudio_forwarded()
-    if pa_server:
-        env["PULSE_SERVER"] = pa_server
-    elif env.get("PULSE_SERVER") == "":
-        # An empty PULSE_SERVER breaks libpulse ("Invalid server"). Drop it so
-        # paplay falls back to its default discovery (X11, autospawn, etc.).
-        env.pop("PULSE_SERVER", None)
-
-    proc = subprocess.run(
-        [player_bin],
-        input=wav_bytes,
-        check=False,
-        capture_output=False,
-        env=env,
+    # Lost the race with a disconnecting listener. Don't waste the synthesis.
+    console.print(
+        f"[yellow]sink '{sink_key}' dropped before delivery; playing here[/yellow]"
     )
-
-    # A non-zero exit while PULSE_SERVER points at a *remote* server (e.g. a
-    # stale `export PULSE_SERVER=tcp:host:4713` from a forwarding session whose
-    # host is now offline) is almost always "Connection refused". When we're not
-    # in an SSH session there's a working local sound server right here, so retry
-    # once with PULSE_SERVER stripped to let libpulse find the local socket.
-    if (
-        proc.returncode != 0
-        and not _is_ssh_session()
-        and env.get("PULSE_SERVER")
-    ):
-        local_env = env.copy()
-        local_env.pop("PULSE_SERVER", None)
-        local_env.pop("PULSE_SINK", None)
-        retry = subprocess.run(
-            [player_bin],
-            input=wav_bytes,
-            check=False,
-            capture_output=False,
-            env=local_env,
-        )
-        if retry.returncode == 0:
-            typer.secho(
-                f"note: PULSE_SERVER={env['PULSE_SERVER']} was unreachable; "
-                "played on the local sound server instead.",
-                fg=typer.colors.YELLOW, err=True,
-            )
-            return
-        proc = retry
-
-    if proc.returncode != 0:
-        if _is_ssh_session() and not _pulseaudio_forwarded():
-            typer.secho(
-                f"{player_bin} failed (exit {proc.returncode}). "
-                "Audio playback inside an SSH session requires PulseAudio forwarding.\n"
-                "Quick fixes:\n"
-                "  • ssh -X <host>                     # X11 forwarding often carries audio\n"
-                "  • ssh -R 4713:localhost:4713 <host>  # forward PA TCP, then set:\n"
-                "    export PULSE_SERVER=127.0.0.1:4713\n"
-                "  • From your local machine instead:\n"
-                "    ssh <host> voxxy speak --raw 'text' | paplay\n"
-                "    voxxy speak --via <host> 'text'",
-                fg=typer.colors.YELLOW, err=True,
-            )
-        else:
-            typer.secho(
-                f"{player_bin} exited with {proc.returncode}",
-                fg=typer.colors.YELLOW, err=True,
-            )
+    try:
+        play_encoded(client.fetch_audio(resp.audio_url), player_bin)
+    except PlaybackError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    return True
 
 
 def _speak_via_ssh(

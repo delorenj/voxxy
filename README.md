@@ -144,7 +144,12 @@ voxxy voice delete <name> [--yes]    remove voice (prompts unless --yes)
 
 voxxy speak [TEXT] [flags]           synthesize; reads stdin if TEXT omitted
                                      flags: --voice, --url, --via <host>, --raw,
-                                            --play, --out <file>, --engine <name>
+                                            --play, --out <file>, --engine <name>,
+                                            --sink <name>, --no-sink
+
+voxxy listen [flags]                 become a sink: play what other hosts send here
+                                     flags: --key, --url, --player, --print-only, --once
+voxxy sink status [KEY]              how many machines are listening on a sink
 
 voxxy health                         /healthz formatted; exit code reflects status
 voxxy logs <service>                 docker logs -f {core|voxcpm|vibevoice}
@@ -166,7 +171,11 @@ directly.
 | `POST /voices` | Upload a reference clip; auto-trimmed, stored under `VOX_VOICES_DIR`, `vibevoice_ref_path` auto-populated. |
 | `GET /audio/<id>.ogg` | Fetch a cached synthesis blob. Hex-only ids (path-traversal guarded); TTL-swept. |
 | `GET /healthz` | Per-engine availability + overall status (`overall=false` → 503). |
-| `GET /mcp/` | FastMCP streamable HTTP endpoint (trailing slash required). Tools: `vox:speak`, `vox:speak_url`, `vox:list_voices`. |
+| `GET /sink/<key>` | `{key, listeners}` — how many machines are listening on this sink. |
+| `POST /sink/<key>/play` | Push an already-synthesized `{audio_url}` to a sink's listeners. Returns `{delivered}`. |
+| `POST /sink/<key>/say` | Synthesize *and* push, in one call. Same body as `/synthesize`. |
+| `GET /sink/<key>/events` | SSE stream a listener subscribes to. Held open; heartbeats every 20s. |
+| `GET /mcp/` | FastMCP streamable HTTP endpoint (trailing slash required). Tools: `vox:speak`, `vox:speak_url`, `vox:speak_sink`, `vox:list_voices`. |
 
 
 ### Securing `vox.delo.sh` with `VOX_API_KEY`
@@ -260,13 +269,9 @@ VOX_REMOTE_HOST=big-chungus voxxy speak "deploy finished"
 # The vox-speak shim is preserved verbatim for legacy callers:
 vox-speak --raw "legacy pipeline still works" | paplay
 
-# Audio forwarding when already SSH'd into the host
-# If you have forwarded PulseAudio TCP (port 4713) or X11, playback is
-# auto-detected; otherwise the tool prints setup hints instead of a raw
-# paplay error.
-ssh -R 4713:localhost:4713 big-chungus
-# then inside the session:
-voxxy speak "deploy finished"
+# Already SSH'd into the host? Don't forward a sound server — use a sink.
+# See "Sinks" below. (Forwarded PulseAudio on port 4713 is still auto-detected
+# if you have it, and the tool prints setup hints rather than a raw paplay error.)
 ```
 
 In via-mode the text payload travels over SSH's stdin (not the command line),
@@ -277,11 +282,85 @@ env vars on the *local* box do not leak to the remote.
 Env overrides: `VOX_VOICE` (default voice), `VOX_URL` (service base URL,
 defaults to `https://vox.delo.sh`), `VOX_API_KEY` (optional auth for secured
 deployments), `VOX_PLAYER` (default `paplay`),
+`VOX_SINK` (sink to route playback to — the one to set in a remote shell's
+`~/.zshenv`),
 `VOX_REMOTE_HOST` (SSH host for via-mode), `VOX_REMOTE_BIN` (remote binary,
 defaults to `voxxy` — the remote's non-interactive `PATH` must include it;
 put `path=(~/.local/bin $path)` in `~/.zshenv` on the remote, not `~/.zshrc`,
 or set `VOX_REMOTE_BIN` to an absolute path), `VOXXY_HOME` (project-root
 override for project discovery when operating outside the repo).
+
+### Sinks — hear it where you are, not where the process is
+
+A process on the stack host has no speakers anyone is sitting in front of. An
+ssh session, a zellij pane, a Hermes systemd unit, a cron job — `paplay` there
+plays into an empty room. A **sink** is a named destination *you* own, so audio
+egress follows the human instead of the process.
+
+```bash
+# On the machine you're actually at (laptop, desktop):
+voxxy listen --key delo-macbook
+
+# Anywhere else — ssh session, zellij pane, agent, cron job:
+export VOX_SINK=delo-macbook        # put this in ~/.zshenv on the remote
+voxxy speak "deploy finished"       # → comes out of your laptop
+
+# One-off without touching the environment:
+voxxy speak --sink delo-macbook "deploy finished"
+voxxy speak --no-sink "..."         # force this machine's speakers
+
+# Any HTTP caller can reach your ears — no CLI needed:
+curl -X POST https://vox.delo.sh/sink/delo-macbook/say \
+  -H 'content-type: application/json' \
+  -d '{"text":"the build is green"}'
+
+voxxy sink status delo-macbook      # {"key":"delo-macbook","listeners":1}
+```
+
+**Why a server relay rather than an ssh reverse tunnel.** A tunnel (`ssh -R
+4713:...` with PulseAudio, or any port-forwarded local sink) dies with the ssh
+connection — but a zellij session *outlives* it, so the moment you reconnect,
+that pane's `PULSE_SERVER` points at a port that no longer goes anywhere. A sink
+key is a **stable identity**: set it once, and it stays correct across
+reconnects, reboots, and network changes. It also works from hosts that have no
+ssh path back to you at all, which is what makes it usable from an agent.
+
+**How it flows.** `voxxy listen` holds an SSE connection to
+`GET /sink/<key>/events`. A caller publishes an `audio_url`, and the listener
+fetches the OGG/Opus itself over the same public `/audio/<id>.ogg` route
+Telegram uses. Only a small JSON envelope crosses the relay.
+
+**Behavior worth knowing:**
+
+- `speak` probes listener count *before* synthesizing, so a sink with nobody on
+  it costs one cheap request and then falls back to local playback. The text is
+  synthesized exactly once either way.
+- `--raw` and `--out` produce bytes for the caller, so they ignore sinks entirely.
+- Multiple listeners on one key all receive every utterance (laptop *and* desktop).
+- The listener reconnects with backoff through drops, sleeps, and redeploys. It
+  only gives up on a wrong API key or a malformed sink name.
+- Sink state is in-memory and not persisted. If nobody is listening, a message is
+  *worthless*, not pending — nothing is queued for later.
+- **ffmpeg is required on the listening machine.** The relay ships OGG/Opus and
+  CoreAudio can't decode it, so `voxxy listen` transcodes to WAV before handing
+  it to `afplay`/`paplay` (macOS: `brew install ffmpeg`).
+
+> **Set `VOX_API_KEY` if you expose this publicly.** Without it, anyone who
+> guesses your sink name can make your laptop talk. Long random sink keys help,
+> but the API key is the actual control. See
+> [Securing `vox.delo.sh`](#securing-voxdelosh-with-vox_api_key).
+
+**Run it at login** so the machine is always a sink:
+
+```bash
+# macOS
+cp scripts/com.delo.voxxy-listen.plist ~/Library/LaunchAgents/   # edit VOX_SINK first
+launchctl load -w ~/Library/LaunchAgents/com.delo.voxxy-listen.plist
+
+# Linux (user unit — a system unit can't reach your audio session)
+cp scripts/voxxy-listen.service ~/.config/systemd/user/          # edit VOX_SINK first
+systemctl --user daemon-reload && systemctl --user enable --now voxxy-listen
+```
 
 ### Automation wrapper (`voxxy-http-tts`)
 

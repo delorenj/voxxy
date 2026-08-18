@@ -1,0 +1,32 @@
+# systemd *user* unit for `voxxy listen` — makes this Linux box a vox sink.
+#
+# Install:
+#   cp scripts/voxxy-listen.service ~/.config/systemd/user/
+#   systemctl --user edit voxxy-listen.service   # or edit Environment= below
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now voxxy-listen
+#
+# Logs:   journalctl --user -u voxxy-listen -f
+#
+# Must be a *user* unit, not a system one: playback needs the user's session
+# bus and PipeWire/PulseAudio socket, which a system unit cannot reach.
+# For it to survive logout, run: loginctl enable-linger $USER
+
+[Unit]
+Description=voxxy sink listener (play audio routed from the vox service)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=VOX_SINK=%H-desk
+Environment=VOX_URL=https://vox.delo.sh
+ExecStart=%h/.local/bin/voxxy listen
+
+# The listener reconnects internally; Restart= covers the case where it exits
+# anyway. RestartSec keeps a hard-failing config (bad API key) from spinning.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

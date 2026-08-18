@@ -21,9 +21,10 @@ Design notes:
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 import httpx
 from pydantic import BaseModel, Field
@@ -89,6 +90,25 @@ class VoiceOut(BaseModel):
     elevenlabs_voice_id: Optional[str] = None
     vibevoice_ref_path: Optional[str] = None
     vibevoice_speaker_tag: Optional[str] = None
+
+
+class SinkStatusResponse(BaseModel):
+    """Response from GET /sink/{key} — how many machines are listening."""
+
+    key: str
+    listeners: int
+
+
+class SinkPlayResult(BaseModel):
+    """Response from POST /sink/{key}/play and /sink/{key}/say.
+
+    ``delivered == 0`` is a normal outcome, not an error: it means no machine
+    was listening on that sink, and the caller should play the audio itself.
+    """
+
+    key: str
+    delivered: int
+    audio_url: Optional[str] = None
 
 
 class SynthUrlResponse(BaseModel):
@@ -307,3 +327,109 @@ class VoxClient:
             raise VoxServerError(f"Error fetching audio: {resp.status_code}")
 
         return resp.content
+
+    # ---------- sink relay ----------
+
+    def sink_status(self, key: str) -> SinkStatusResponse:
+        """GET /sink/{key} — how many listeners the sink currently has.
+
+        Cheap enough to call before every synthesis, which is how `speak` avoids
+        synthesizing twice: it learns which path to take *before* committing to
+        raw-WAV-for-local or OGG-to-cache-for-remote.
+        """
+        resp = self._request("GET", f"/sink/{key}")
+        return SinkStatusResponse.model_validate(resp.json())
+
+    def sink_play(
+        self,
+        key: str,
+        audio_url: str,
+        *,
+        text: Optional[str] = None,
+        voice: Optional[str] = None,
+        engine: Optional[str] = None,
+        duration_s: Optional[float] = None,
+    ) -> SinkPlayResult:
+        """POST /sink/{key}/play — push an already-synthesized URL to a sink."""
+        payload: dict = {"audio_url": audio_url}
+        if text is not None:
+            payload["text"] = text
+        if voice is not None:
+            payload["voice"] = voice
+        if engine is not None:
+            payload["engine"] = engine
+        if duration_s is not None:
+            payload["duration_s"] = duration_s
+
+        resp = self._request("POST", f"/sink/{key}/play", json=payload)
+        return SinkPlayResult.model_validate(resp.json())
+
+    def sink_say(
+        self,
+        key: str,
+        text: str,
+        voice: Optional[str] = None,
+        *,
+        cfg: float = 2.0,
+        steps: int = 10,
+    ) -> SinkPlayResult:
+        """POST /sink/{key}/say — synthesize and push to a sink in one call."""
+        payload: dict = {"text": text, "cfg": cfg, "steps": steps}
+        if voice:
+            payload["voice"] = voice
+
+        resp = self._request("POST", f"/sink/{key}/say", json=payload)
+        return SinkPlayResult.model_validate(resp.json())
+
+    def stream_sink_events(self, key: str) -> Iterator[dict]:
+        """GET /sink/{key}/events — yield decoded SSE events until disconnect.
+
+        Yields ``{"event": <name>, "data": <parsed json>}``. The read timeout is
+        disabled for the life of the stream: an idle sink is the normal state,
+        and the server's heartbeat comments are what prove the connection is
+        still alive. Comment frames are consumed here, never surfaced.
+
+        Reconnect policy is the caller's business — this generator simply ends
+        when the stream does.
+        """
+        # connect/write/pool keep their bounds so a dead server still fails fast;
+        # only the read timeout goes away, because waiting is the point.
+        timeout = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
+        headers = {"Accept": "text/event-stream", "Cache-Control": "no-cache"}
+
+        try:
+            with self._client.stream(
+                "GET", f"/sink/{key}/events", timeout=timeout, headers=headers
+            ) as resp:
+                if resp.status_code == 401:
+                    raise VoxUnauthorized(f"Unauthorized subscribing to sink '{key}'")
+                if resp.status_code >= 400:
+                    resp.read()
+                    raise VoxServerError(
+                        f"sink subscribe failed: {resp.status_code}: {resp.text[:200]}"
+                    )
+
+                event = "message"
+                data_lines: list[str] = []
+                for line in resp.iter_lines():
+                    line = line.rstrip("\r")
+                    if line.startswith(":"):
+                        continue  # heartbeat comment
+                    if line == "":
+                        if data_lines:
+                            raw = "\n".join(data_lines)
+                            data_lines = []
+                            name, event = event, "message"
+                            try:
+                                yield {"event": name, "data": json.loads(raw)}
+                            except json.JSONDecodeError:
+                                yield {"event": name, "data": {"raw": raw}}
+                        continue
+                    if line.startswith("event:"):
+                        event = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].lstrip())
+        except httpx.ConnectError as exc:
+            raise VoxUnreachable(f"Could not connect to sink stream: {exc}") from exc
+        except httpx.TransportError as exc:
+            raise VoxUnreachable(f"Sink stream dropped: {exc}") from exc

@@ -59,6 +59,9 @@ class Config:
     project_root: Optional[Path] = None
     default_url: str = "https://vox.delo.sh"
     default_voice: str = "rick"
+    # Named destination for audio when this shell has no speakers of its own
+    # (ssh session, zellij pane, systemd unit). None = always play locally.
+    default_sink: Optional[str] = None
 
 
 def load_config() -> Config:
@@ -81,6 +84,7 @@ def load_config() -> Config:
         project_root=project_root,
         default_url=raw.get("default_url", Config.default_url),
         default_voice=raw.get("default_voice", Config.default_voice),
+        default_sink=raw.get("default_sink") or None,
     )
 
 
@@ -101,6 +105,8 @@ def save_config(cfg: Config) -> None:
         "default_url": cfg.default_url,
         "default_voice": cfg.default_voice,
     }
+    if cfg.default_sink:
+        data["default_sink"] = cfg.default_sink
     if cfg.project_root is not None:
         data["project_root"] = str(cfg.project_root)
 

@@ -16,6 +16,10 @@ services:
       VOX_REF_AUDIO_MAX_SECONDS: "30"
       VOX_API_KEY: ${VOX_API_KEY:-}
       VOX_DEFAULT_VOICE: ${VOX_DEFAULT_VOICE:-rick}
+      # Default destination for the speak_sink MCP tool, so a fleet agent can
+      # reach whoever is listening without knowing the sink name. Empty means
+      # callers must pass one explicitly.
+      VOX_DEFAULT_SINK: ${VOX_DEFAULT_SINK:-}
       # Engine registry: ordered list of name=url pairs. Core tries them in
       # order; first success wins. ElevenLabs is always appended in-process
       # and self-disables without ELEVENLABS_API_KEY. Default stack assumes

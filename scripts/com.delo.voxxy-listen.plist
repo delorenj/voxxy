@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  macOS LaunchAgent for `voxxy listen` — makes this Mac a vox sink at login.
+
+  Install:
+    cp scripts/com.delo.voxxy-listen.plist ~/Library/LaunchAgents/
+    # edit VOX_SINK below to the name you want, then:
+    launchctl load -w ~/Library/LaunchAgents/com.delo.voxxy-listen.plist
+
+  Check:    launchctl list | grep voxxy
+  Logs:     tail -f ~/Library/Logs/voxxy-listen.log
+  Uninstall: launchctl unload -w ~/Library/LaunchAgents/com.delo.voxxy-listen.plist
+
+  KeepAlive is on because the listener is supposed to outlive network drops and
+  server deploys; it reconnects on its own, and this covers the case where it
+  exits anyway (bad key, killed process).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.delo.voxxy-listen</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <!-- Absolute path: launchd does not source your shell profile, so a bare
+         `voxxy` is not on PATH here. `which voxxy` to confirm yours. -->
+    <string>/Users/delorenj/.local/bin/voxxy</string>
+    <string>listen</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VOX_SINK</key>
+    <string>delo-macbook</string>
+    <key>VOX_URL</key>
+    <string>https://vox.delo.sh</string>
+    <!-- ffmpeg decodes the OGG/Opus the relay ships; CoreAudio can't. Homebrew
+         on Apple Silicon puts it in /opt/homebrew/bin, which launchd's default
+         PATH does not include. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/delorenj/Library/Logs/voxxy-listen.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/delorenj/Library/Logs/voxxy-listen.log</string>
+</dict>
+</plist>

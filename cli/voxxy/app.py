@@ -14,6 +14,7 @@ import typer
 
 from voxxy.commands import daemon as daemon_commands
 from voxxy.commands import engine as engine_commands
+from voxxy.commands import listen as listen_commands
 from voxxy.commands import speak as speak_commands
 from voxxy.commands import util as util_commands
 from voxxy.commands import voice as voice_commands
@@ -28,10 +29,12 @@ app = typer.Typer(
 daemon_app = typer.Typer(help="Stack lifecycle: start, stop, status, install.")
 engine_app = typer.Typer(help="Engine control: list, use, enable, disable, logs.")
 voice_app = typer.Typer(help="Voice management: list, info, add, delete.")
+sink_app = typer.Typer(help="Sink relay: route audio to the machine you're at.")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(engine_app, name="engine")
 app.add_typer(voice_app, name="voice")
+app.add_typer(sink_app, name="sink")
 
 
 @app.callback()
@@ -56,13 +59,15 @@ def _root(
     ctx.obj["quiet"] = quiet
 
 
-# Top-level leaves (health, logs, version, speak).
+# Top-level leaves (health, logs, version, speak, listen).
 util_commands.register(app)
 speak_commands.register(app)
+listen_commands.register(app)
 
 # Engine, voice, and daemon commands.
 engine_commands.register(engine_app)
 voice_commands.register(voice_app)
+listen_commands.register_sink(sink_app)
 daemon_commands.register(daemon_app)
 
 
