@@ -272,10 +272,6 @@
       "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/taxonomy-steward"
     },
     {
-      "name": "toad",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/toad"
-    },
-    {
       "name": "vox-tts",
       "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/vox-tts"
     },
