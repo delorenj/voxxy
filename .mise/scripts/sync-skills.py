@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import json
 import os
+import pathlib
 import re
 import shutil
 import stat
@@ -82,6 +83,23 @@ class PackUnavailable(Exception):
     """
 
 
+# --------------------------------------------------------------------------- #
+# Which repo does this script own?
+#
+# A mise ENTER hook runs with cwd set to the directory the user cd'd into, not
+# to config_root -- and that is true for a PARENT config's hook too, so entering
+# 33GOD/pjangler fired 33GOD's copy of this script with cwd=pjangler. It then
+# loaded pjangler's manifest and rewrote pjangler's .agents/ and CLI skill dirs.
+# `mise run <task>` DOES run at config_root, which is why the cwd assumption
+# looked correct for years: only the enter-hook path was ever wrong.
+#
+# So the subject is taken explicitly, defaulting to $MISE_CONFIG_ROOT (mise
+# exports it per hook, correctly), and it must match the root this script file
+# actually lives in. A repo-local script never acts on cwd, and never on a
+# sibling.
+# --------------------------------------------------------------------------- #
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Sync skills from manifest to agent CLIs."
@@ -100,7 +118,50 @@ def parse_args():
             "directories.  Without this flag they are only reported."
         ),
     )
+    parser.add_argument(
+        "--no-reconcile",
+        action="store_true",
+        help=(
+            "Keep managed projection links this sync did not declare.  By "
+            "default a projection is reconciled: a symlink into a managed "
+            "registry root that no declared skill or pack accounts for is "
+            "removed, because leaving it is what turns a projection into "
+            "sediment (81 of pjangler's 132 links were dangling)."
+        ),
+    )
+    parser.add_argument(
+        "--root",
+        default=os.environ.get("MISE_CONFIG_ROOT") or None,
+        help=(
+            "Project root this sync owns; defaults to $MISE_CONFIG_ROOT.  Never "
+            "cwd: a parent mise config's enter hook runs with cwd set to the "
+            "child directory you entered, so cwd names a sibling repo."
+        ),
+    )
     return parser.parse_args()
+
+
+def own_root():
+    """The repo this script file belongs to: <root>/.mise/scripts/<this>."""
+    return pathlib.Path(__file__).resolve().parents[2]
+
+
+def resolved_project_root(args):
+    mine = own_root()
+    if args.scope != "project":
+        return mine
+    if not args.root:
+        raise SystemExit(
+            "sync-skills: --root (or $MISE_CONFIG_ROOT) is required for "
+            "--scope project; refusing to infer the subject repo from cwd"
+        )
+    requested = pathlib.Path(args.root).resolve(strict=True)
+    if requested != mine:
+        raise SystemExit(
+            f"sync-skills: refusing to act on {requested}; this script belongs "
+            f"to {mine}.  A nested repo must ship its own .mise/scripts copy."
+        )
+    return requested
 
 
 def load_manifest(manifest_path):
@@ -185,6 +246,41 @@ def lexical_symlink_target(link):
     raw_target = Path(os.readlink(link))
     lexical = raw_target if raw_target.is_absolute() else link.parent / raw_target
     return Path(os.path.normpath(str(lexical)))
+
+
+def assert_nonrecursive_skill_link(destination, source):
+    """Reject a link that would point from inside a skill back to that skill.
+
+    A repository may legitimately be the source of a globally distributed
+    skill.  When fanout runs inside that same repository, however, projecting
+    ``<repo>/.claude/skills/<name> -> <repo>`` creates an unbounded filesystem
+    cycle for every symlink-following walker.  Compare the lexical destination
+    against the resolved source so the check also catches a catalog alias that
+    points at the repository root.
+
+    The one safe equality is an existing real directory in the shared managed
+    projection.  That directory is already in its final location and the
+    caller preserves it instead of creating a symlink.
+    """
+    destination = Path(destination).absolute()
+    source = Path(source).resolve(strict=True)
+    if destination == source and is_real_directory(destination):
+        return
+    try:
+        destination.relative_to(source)
+    except ValueError:
+        return
+    raise ValueError(
+        "Refusing recursive skill symlink: destination "
+        f"{destination} is inside its resolved source {source}"
+    )
+
+
+def assert_nonrecursive_skill_topology(active_cli_dirs, skill_sources):
+    """Validate every proposed source/destination pair before any mutation."""
+    for _cli_dir, expected_cli in active_cli_dirs:
+        for name, source in skill_sources.items():
+            assert_nonrecursive_skill_link(expected_cli / validate_skill_name(name), source)
 
 
 def preflight_cli_dirs(
@@ -284,6 +380,8 @@ def preflight_cli_dirs(
             if cli_dir.exists() and cli_dir.resolve(strict=True) != expected_cli:
                 raise ValueError(f"CLI skills directory escapes its parent: {cli_dir}")
         add_target(cli_dir, expected_cli)
+    if skill_sources is not None:
+        assert_nonrecursive_skill_topology(active, skill_sources)
     return active
 
 
@@ -776,7 +874,7 @@ def select_pack_version(pack_dir):
     The discriminator is what those children ARE: a child holding a regular
     SKILL.md is a skill, so its parent cannot be a version root.  Contrast
     `packs/bmad/`, also pack.toml-less and also all real directories, but whose
-    children (6.10.1-next.31/, 6.10.2/) hold no top-level SKILL.md -- that IS a
+    children (1.2.0-next.3/, 1.3.0/) hold no top-level SKILL.md -- that IS a
     version layout and the highest version is selected.
 
     `packs/Kurzgesagt/` is NOT an example of this: its twelve children are all
@@ -1330,7 +1428,7 @@ def resolve_pack(
 
         {"name", "root", "family_root", "declared"}
 
-    `root` is the exact pack root (e.g. `packs/bmad/6.10.2`); `family_root` is
+    `root` is the exact pack root (e.g. `packs/bmad/1.3.0`); `family_root` is
     `packs/bmad` when the pack lives under a version directory, else None. The
     two are reported SEPARATELY on purpose: a sibling version under the same
     family root is NOT this pack, so callers must never treat the family root
@@ -1526,12 +1624,68 @@ def handle_retired_dirs(cli_dirs_base, managed_roots, prune=False):
 # --------------------------------------------------------------------------- #
 
 
+def reconcile_projection(real_cli_dir, skills_map, managed_roots):
+    """Remove managed projection links this sync does not account for.
+
+    `fanout_to_cli` only ever added and overwrote. Nothing removed a link, so a
+    projection was a monotonically growing record of every skill the repo ever
+    declared: rename a skill, retire a pack, or move a registry cache and the
+    old link stayed forever, dangling. Measured on the reporting machine: 81 of
+    pjangler's 132 `.claude/skills` links pointed at BMAD pack versions that no
+    longer exist, and a hand-planted broken link -- including one whose name IS
+    a declared entry -- survived a re-run untouched.
+
+    Deliberately narrow. Only a SYMLINK is ever removed, and only when its
+    LEXICAL target (never a resolved one -- resolving a hostile link would walk
+    outside the project first) lies inside a managed registry root. So:
+
+      - a real directory is never touched: that is BMAD's installer output in
+        `<cli>/skills`, or a hand-authored skill in `.agents/skills`;
+      - a link pointing anywhere outside the managed roots is the operator's
+        own and is left alone;
+      - a pack member survives, because `skills_map` already contains every
+        name the declared packs resolved to before fanout runs.
+    """
+    removed = []
+    try:
+        entries = sorted(os.listdir(real_cli_dir))
+    except OSError:
+        return removed
+    for name in entries:
+        if name in skills_map:
+            continue
+        candidate = real_cli_dir / name
+        if not candidate.is_symlink():
+            continue
+        try:
+            target = lexical_symlink_target(candidate)
+        except OSError:
+            continue
+        dangling = not candidate.exists()
+        # A DANGLING link is removed wherever it points. It names a skill and
+        # resolves to nothing, so it cannot be serving anyone, and the managed-root
+        # test would miss exactly the ones that hurt most: the relics of a retired
+        # intermediate hop. `<repo>/.claude/skills/hindsight ->
+        # 33GOD/skills/hindsight` outlived that farm entry and is not inside any
+        # registry root, so it would have rotted here forever. A link that still
+        # resolves is only removed inside a managed root, where this engine is the
+        # only writer.
+        if not dangling and not is_inside_managed_root(target, managed_roots):
+            continue
+        state = "dangling" if dangling else "undeclared"
+        candidate.unlink()
+        removed.append((candidate, target, state))
+        print(f"✗ {candidate} ({state} -> {target})")
+    return removed
+
 def fanout_to_cli(
     cli_dirs_base,
     skills_map,
     active_cli_dirs=None,
     before_mutation=None,
     scope="project",
+    managed_roots=None,
+    reconcile=True,
 ):
     """
     Creates symlinks in each of the supported CLI skill dirs relative to
@@ -1539,7 +1693,12 @@ def fanout_to_cli(
     """
     skill_names = [validate_skill_name(name) for name in skills_map]
     if active_cli_dirs is None:
-        active_cli_dirs = preflight_cli_dirs(cli_dirs_base, skill_names, scope)
+        active_cli_dirs = preflight_cli_dirs(
+            cli_dirs_base,
+            skill_names,
+            scope,
+            skill_sources=skills_map,
+        )
     if skill_names and not active_cli_dirs:
         # A sync that resolves skills but has nowhere to put them has FAILED.
         # Reporting success here is how a topology change silently unprojects
@@ -1564,6 +1723,7 @@ def fanout_to_cli(
             symlink_target = real_cli_dir / name
             if symlink_target.parent != real_cli_dir:
                 raise ValueError(f"Skill destination escapes CLI directory: {symlink_target}")
+            assert_nonrecursive_skill_link(symlink_target, actual_path)
 
             # A project-local source may already be the exact destination in
             # the shared `.agents/skills` projection. Preserve that real
@@ -1591,15 +1751,91 @@ def fanout_to_cli(
                     symlink_target.unlink()
 
             revalidate_cli_dir(cli_dirs_base, cli_dir, expected_cli)
+            assert_nonrecursive_skill_link(symlink_target, actual_path)
             os.symlink(actual_path, symlink_target)
             linked_total += 1
             print(f"→ {symlink_target} -> {actual_path}")
 
+    removed_total = 0
+    if reconcile and managed_roots:
+        for cli_dir, expected_cli in active_cli_dirs:
+            revalidate_cli_dir(cli_dirs_base, cli_dir, expected_cli)
+            removed_total += len(
+                reconcile_projection(
+                    expected_cli.resolve(strict=True), skills_map, managed_roots
+                )
+            )
+
     print(
-        f"sync-skills: {linked_total} new/updated symlink(s) "
+        f"sync-skills: {linked_total} new/updated symlink(s), "
+        f"{removed_total} stale link(s) removed "
         f"across CLIs in {cli_dirs_base}"
     )
 
+
+def report_global_inheritance(global_manifest_path):
+    """Verify that the user scope is reachable; project NOTHING from it.
+
+    `inherit_global: true` used to prepend the whole global manifest as layer 0
+    of a PROJECT run, so every global skill was materialized as a fresh symlink
+    inside every project CLI skill dir -- 38 resolvable global skills x2 present
+    CLI dirs = 76 links per project, re-created on every `cd`.
+
+    That work is dead. Every agent CLI installed on a machine like this one
+    reads the user scope implicitly, and each of its global skill roots is
+    already a single dir-level symlink to ~/.agents/skills:
+
+        ~/.claude/skills ~/.codex/skills ~/.gemini/skills ~/.copilot/skills
+        ~/.kimi-code/skills ~/.config/opencode/skills ~/.openclaw/skills
+
+    One projection, N aliases -- so a global skill is visible in a project
+    because the CLI inherits the user scope, not because someone copied a link
+    into the repo. A project projection holds only that repo's own declared
+    skills and its declared packs.
+
+    What is left here is the check: if the user-scope alias is missing or points
+    somewhere else, global skills are NOT reachable and the operator should hear
+    about it rather than have this script quietly paper over it with copies.
+    """
+    home = Path(os.path.expanduser("~"))
+    managed = managed_global_skills_dir(home)
+    reachable, broken = [], []
+    for cli_rel_path in cli_skill_dirs("global"):
+        alias = home / cli_rel_path
+        if not alias.exists() and not alias.is_symlink():
+            continue
+        try:
+            if alias.resolve(strict=True) == managed.resolve(strict=True):
+                reachable.append(cli_rel_path)
+                continue
+        except OSError:
+            pass
+        broken.append(cli_rel_path)
+    # This runs from an enter hook on every `cd`, so say nothing when the user
+    # scope is intact. Report only what an operator has to act on.
+    if not broken and reachable:
+        return
+    declared = len(load_manifest(global_manifest_path).get("skills", []))
+    for cli_rel_path in broken:
+        print(
+            f"Warning: ~/{cli_rel_path} does not resolve to {managed}; global "
+            f"skills are not reachable for that CLI.  Fix the alias "
+            f"(ln -sfn {managed} ~/{cli_rel_path}); do not copy links into "
+            f"projects.",
+            file=sys.stderr,
+        )
+    if not reachable:
+        print(
+            f"Warning: no user-scope alias of {managed} was found, so none of "
+            f"the {declared} global skill(s) declared in {global_manifest_path} "
+            f"are reachable from any CLI.",
+            file=sys.stderr,
+        )
+
+
+def managed_global_skills_dir(home):
+    """The single user-scope projection every global CLI root aliases."""
+    return home.joinpath(*MANAGED_SKILLS_RELATIVE)
 
 def manifest_layer(manifest_path):
     manifest = load_manifest(manifest_path)
@@ -1616,8 +1852,9 @@ def manifest_layer(manifest_path):
 def main():
     args = parse_args()
 
+    project_root = resolved_project_root(args)
     global_manifest_path = Path(os.path.expanduser("~/.agents/skills.json"))
-    project_manifest_path = Path(os.getcwd()) / ".agents" / "skills.json"
+    project_manifest_path = project_root / ".agents" / "skills.json"
 
     # Destination topology is a security boundary.  Validate every active CLI
     # directory before cloning/updating registries, creating caches, or changing
@@ -1631,12 +1868,11 @@ def main():
         print(f"Loading global manifest from {global_manifest_path}")
         layers.append(manifest_layer(global_manifest_path))
     else:
-        preflight_base = Path(os.getcwd())
+        preflight_base = project_root
         print(f"Loading project manifest from {project_manifest_path}")
         project_layer = manifest_layer(project_manifest_path)
         if project_layer["manifest"].get("inherit_global", False):
-            print("Inheriting global skills...")
-            layers.append(manifest_layer(global_manifest_path))
+            report_global_inheritance(global_manifest_path)
         layers.append(project_layer)
 
     preflight_names = []
@@ -1719,6 +1955,8 @@ def main():
         skills_to_sync,
         active_cli_dirs=active_cli_dirs,
         scope=args.scope,
+        managed_roots=managed_roots,
+        reconcile=not args.no_reconcile,
     )
 
     handle_retired_dirs(preflight_base, managed_roots, prune=args.prune_retired)

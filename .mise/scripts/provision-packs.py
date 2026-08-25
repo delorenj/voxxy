@@ -19,15 +19,17 @@ What this script owns is the transactional projection into the project:
     one unsafe or tampered pack produces ZERO mutation
   * `.agents/skills.json` is rewritten atomically, preserving its mode
 
-Backwards compatibility: a project that declares no `bmad` pack still gets the
-pinned BMAD pack expanded into `skills[]`, exactly as before. Declaring
-`{"name": "bmad", ...}` in `packs[]` takes over and the pin is not consulted.
+Only packs a project DECLARES in `packs[]` are provisioned. Nothing is pinned
+implicitly -- in particular BMAD is not a pack: `bmad-method install` writes
+bmad-* skills into `.agents/skills` itself, versioned per project by
+`_bmad/_config/manifest.yaml`.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import argparse
 import os
 import re
 import shutil
@@ -40,11 +42,12 @@ from typing import Callable
 SKILLS_SCHEMA = "https://raw.githubusercontent.com/delorenj/skillex/main/skills.schema.json"
 SKILLS_REGISTRY = "https://github.com/delorenj/skillex.git"
 
-# The BMAD pack pinned when a project declares none. Sealed from this side so
-# the pinned release is verified byte-for-byte even though its `pack.toml`
-# predates `[policy] sealed`.
-BMAD_PACK_NAME = "bmad"
-BMAD_PACK_VERSION = "6.10.1-next.31"
+# BMAD is NOT a pack. `bmad-method install` writes bmad-* skills into
+# .agents/skills itself, per project, versioned by _bmad/_config/manifest.yaml.
+# This script used to pin a frozen `packs/bmad/<version>` in the registry and
+# project a second copy of the same skills; when the registry dropped that pack
+# the pin took every `pjangler project create` down with it on any machine
+# without a warm cache. Only packs a project DECLARES are provisioned now.
 
 
 def load_engine():
@@ -68,36 +71,11 @@ engine = load_engine()
 
 
 def pack_root_override(name: str) -> Path | None:
-    """Developer/test pin for one pack root, e.g. `PJ_PACK_ROOT_HERMES_BASE`.
-
-    `PJ_BMAD_PACK_ROOT` predates the generic form and stays a first-class alias
-    for the `bmad` pack.
-    """
+    """Developer/test pin for one pack root, e.g. `PJ_PACK_ROOT_HERMES_BASE`."""
     generic = os.environ.get(f"PJ_PACK_ROOT_{re.sub(r'[^A-Z0-9]', '_', name.upper())}", "").strip()
     if generic:
         return Path(generic).expanduser().absolute()
-    if name == BMAD_PACK_NAME:
-        legacy = os.environ.get("PJ_BMAD_PACK_ROOT", "").strip()
-        if legacy:
-            return Path(legacy).expanduser().absolute()
     return None
-
-
-def implicit_bmad_entry() -> dict:
-    """The implicit BMAD pin, expressed as an ordinary `packs[]` entry.
-
-    It deliberately carries NO `source`: like every declared pack it must walk
-    the one resolution ladder in `resolve_pack_root()` -- env override first,
-    then the contract-ordered registry checkouts. Pinning a hardcoded root here
-    would give the same pack name two resolutions in one process, so adding
-    `packs:[{"name":"bmad",...}]` to a manifest would silently MOVE the pack.
-    """
-    return {
-        "name": BMAD_PACK_NAME,
-        "version": BMAD_PACK_VERSION,
-        "sealed": True,
-        "optional": False,
-    }
 
 
 def apply_root_override(entry: dict) -> dict:
@@ -150,24 +128,11 @@ def resolve_declared_packs(manifest: dict, base_dir: Path):
             # Later packs override earlier ones (contract section 5).
             declared_members[name] = path
 
+    # Nothing is pinned implicitly any more. The empty pair is kept so every
+    # caller keeps one shape and the manifest writer still evicts leftovers
+    # from when something WAS pinned here.
     implicit_members: dict[str, Path] = {}
     implicit_packs: list[dict] = []
-    if not any(entry["name"] == BMAD_PACK_NAME for entry in entries):
-        # Same call shape as a declared pack above, so the pin cannot resolve
-        # anywhere a declared `bmad` entry would not.
-        pinned = engine.normalize_pack_entry(apply_root_override(implicit_bmad_entry()))
-        pinned["sealed"] = True
-        for name, path in engine.resolve_pack(
-            pinned,
-            cache_dir,
-            base_dir,
-            default_registry,
-            registry_roots,
-            managed_roots,
-            on_resolved=implicit_packs.append,
-        ):
-            implicit_members[name] = path
-
     return declared_members, implicit_members, declared_packs, implicit_packs
 
 
@@ -322,13 +287,46 @@ def atomic_write(path: Path, content: bytes, mode: int) -> None:
 # --------------------------------------------------------------------------- #
 
 
+def own_root() -> Path:
+    """The repo this script file belongs to: <root>/.mise/scripts/<this>."""
+    return Path(__file__).resolve().parents[2]
+
+
+def resolved_project_root(requested: str | None) -> Path:
+    """Resolve the repo to provision, refusing to infer it from cwd.
+
+    A mise ENTER hook runs with cwd set to the directory the user cd'd into, not
+    config_root -- including a PARENT config's hook. That is how 33GOD's copy of
+    this script came to force-rewrite `pjangler/.agents/skills.json` and plant 75
+    dangling pack links in `pjangler/.agents/skills`. `mise run <task>` does run
+    at config_root, so the cwd assumption was only ever wrong on the hook path.
+    """
+    mine = own_root()
+    if requested is None:
+        requested = os.environ.get("MISE_CONFIG_ROOT") or None
+    if requested is None:
+        raise SystemExit(
+            "provision-packs: --root (or $MISE_CONFIG_ROOT) is required; "
+            "refusing to infer the subject repo from cwd"
+        )
+    resolved = Path(requested).resolve(strict=True)
+    if resolved != mine:
+        raise SystemExit(
+            f"provision-packs: refusing to act on {resolved}; this script "
+            f"belongs to {mine}.  A nested repo must ship its own "
+            ".mise/scripts copy."
+        )
+    return resolved
+
+
 def provision(
     *,
+    root: str | None = None,
     after_preflight: Callable[[], None] | None = None,
     create_link: Callable[[Path, Path, int], None] | None = None,
     after_apply: Callable[[Path, Path], None] | None = None,
 ) -> int:
-    project_root = Path.cwd().resolve(strict=True)
+    project_root = resolved_project_root(root)
     agents_path = project_root / ".agents"
     skills_path = agents_path / "skills"
     agents_existed = agents_path.exists() or agents_path.is_symlink()
@@ -423,10 +421,24 @@ def provision(
             )
         except OSError:
             link_targets_pack = False
+        # PJAN-82: a DANGLING symlink here is stale by definition.
+        #
+        # An entry stopped being recognizable as pack-managed the moment its pack
+        # declaration went away: `ownership_roots` no longer contains the pack, so
+        # `link_targets_pack` is false, and the normalized manifest no longer names
+        # it either — so the checks below skipped it and it stayed forever. That is
+        # how momo, bloodbank and candystore each ended up with 76 links into
+        # `~/.agents/.cache/registries/.../packs/bmad/6.10.1-next.31/`, a cache
+        # directory that no longer exists. A link that resolves to nothing cannot be
+        # a hand-authored skill and cannot be serving anyone, so it is reclaimable
+        # regardless of where it points. A link that still RESOLVES is left alone
+        # unless it is provably pack-managed.
+        dangling_link = link_target is not None and not entry.exists()
         if (
             entry.name not in expected
             and entry.name not in managed_manifest_names
             and not link_targets_pack
+            and not dangling_link
         ):
             continue
         target = expected.get(entry.name)
@@ -550,8 +562,18 @@ def provision(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Provision declared Skillex packs.")
+    parser.add_argument(
+        "--root",
+        default=None,
+        help=(
+            "Project root to provision; defaults to $MISE_CONFIG_ROOT.  Never "
+            "cwd -- see resolved_project_root()."
+        ),
+    )
+    args = parser.parse_args()
     try:
-        changed = provision()
+        changed = provision(root=args.root)
     except (FileNotFoundError, OSError, ValueError, RuntimeError, engine.PackUnavailable) as error:
         raise SystemExit(
             f"Skillex pack provisioning failed: {error}; "
