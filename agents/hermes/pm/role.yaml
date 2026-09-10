@@ -28,9 +28,16 @@ ticket_provider:
   board_url: "https://plane.delo.sh/33god/projects/b757648f-0067-482c-84b5-947158a7af3f/issues/"
   workspace: ""
   project: ""     # Plane project uuid (set by 42-ticket-provider.sh)
-  # Optional normalized-state name overrides for non-standard boards.
-  in_review: ""   # e.g. "In Review"
-  completed: ""   # e.g. "Done"
+  in_review: "E2E Testing & QA"
+  completed: "Done"
+  backlog: "Backlog"
+  unstarted: "Todo"
+  started: "In Progress"
+  cancelled: "Cancelled"
+  awaiting_decision: "Awaiting Decision"
+  e2e_testing: "E2E Testing & QA"
+  ready_for_documentation: "Ready for Documentation"
+  needs_re_evaluation: "Needs Re-evaluation"
 
 # Scrum Master sentinel knobs (only meaningful for role: scrum-master).
 scrum_master:
