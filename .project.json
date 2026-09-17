@@ -15,12 +15,5 @@
       "role": "pm",
       "role_dir": "agents/hermes/pm"
     }
-  },
-  "automation": {
-    "reconcile": {
-      "enabled": false,
-      "grace_hours": 0,
-      "auto_review": true
-    }
   }
 }
