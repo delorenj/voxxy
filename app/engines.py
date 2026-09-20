@@ -322,6 +322,7 @@ class EngineOrchestrator:
         voice_id: Optional[str] = None,
         cfg: float = 2.0,
         steps: int = 10,
+        preferred: Optional[list[str]] = None,
     ) -> SynthResult:
         """Run the engine chain; first success wins.
 
@@ -332,11 +333,19 @@ class EngineOrchestrator:
                 When provided, it takes precedence over ``reference_wav_path``
                 and lets each engine use a different reference clip (e.g. a
                 de-noised version for VibeVoice).
+            preferred: Optional engine names to try before the rest of the
+                chain. A voice whose clone lives on a specific engine (e.g. a
+                VibeVoice reference) should be served by that engine first.
+                Stable sort preserves configured order within each group, so
+                fallback order still follows ``VOX_ENGINES``.
         """
         text_len = len(text)
         last_exc: Optional[BaseException] = None
         tried: list[str] = []  # engines attempted before the winner (for fallback tracking)
-        for engine in self._engines:
+        engines = self._engines
+        if preferred:
+            engines = sorted(engines, key=lambda e: 0 if e.name in preferred else 1)
+        for engine in engines:
             if not engine.available():
                 logger.info("engine %s skipped (unavailable)", engine.name)
                 continue

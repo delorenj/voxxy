@@ -173,20 +173,25 @@ class VoiceOut(BaseModel):
 # ---------- synthesis helpers ----------
 
 async def _resolve_voice(voice_name: Optional[str]) -> tuple[
-    Optional[Callable[[str], Optional[str]]], Optional[str], Optional[str]
+    Optional[Callable[[str], Optional[str]]], Optional[str], Optional[str],
+    Optional[list[str]],
 ]:
-    """Resolve ``voice_name`` into (reference_resolver, prompt_text, elevenlabs_voice_id).
+    """Resolve ``voice_name`` into (reference_resolver, prompt_text, elevenlabs_voice_id, preferred_engines).
 
     ``reference_resolver`` is a callable ``(engine_name) -> wav_path`` so each
     engine can be pointed at a different reference clip (e.g. a de-noised
     version for VibeVoice) without plumbing engine identity through the whole
     call stack. Falls back to ``v.abs_path`` when the engine-specific file
-    doesn't exist on disk.
+    doesn't exist.
 
-    Returns ``(None, None, None)`` for voice-design mode (no voice_name).
+    ``preferred_engines`` names the engine a cloned voice should be served by
+    first (currently: VibeVoice when the profile carries a vibevoice
+    reference). None means configured chain order.
+
+    Returns ``(None, None, None, None)`` for voice-design mode (no voice_name).
     """
     if not voice_name:
-        return None, None, None
+        return None, None, None, None
     assert _repo is not None
     v = await _repo.get(voice_name)
     if v is None:
@@ -198,7 +203,8 @@ async def _resolve_voice(voice_name: Optional[str]) -> tuple[
         p = v.ref_path_for(engine)
         return str(p) if p.exists() else str(v.abs_path)
 
-    return resolver, v.prompt_text, v.elevenlabs_voice_id
+    preferred = ["vibevoice"] if v.vibevoice_ref_path else None
+    return resolver, v.prompt_text, v.elevenlabs_voice_id, preferred
 
 
 async def _synthesize_wav(
@@ -209,7 +215,7 @@ async def _synthesize_wav(
     steps: int,
 ) -> SynthResult:
     assert _engine is not None
-    resolver, prompt_text, eleven_voice_id = await _resolve_voice(voice_name)
+    resolver, prompt_text, eleven_voice_id, preferred = await _resolve_voice(voice_name)
     return await _engine.generate(
         text=text,
         reference_resolver=resolver,
@@ -217,6 +223,7 @@ async def _synthesize_wav(
         voice_id=eleven_voice_id,
         cfg=cfg,
         steps=steps,
+        preferred=preferred,
     )
 
 
