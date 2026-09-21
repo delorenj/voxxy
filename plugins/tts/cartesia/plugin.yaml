@@ -1,0 +1,9 @@
+name: cartesia
+version: 0.1.0
+description: "Cartesia Sonic text-to-speech provider for Hermes, transcoding to Telegram-ready OGG/Opus."
+author: Voxxy
+kind: backend
+requires_env:
+  - name: CARTESIA_API_KEY
+    description: "Cartesia API key (op://DeLoSecrets/ihithizjnbahvczs6ch43ctmba/CARTESIA_API_KEY)"
+    secret: true
