@@ -1,7 +1,6 @@
 {
   "project_name": "Voxxy",
   "project_description": "",
-  "project_slug": "voxxy",
   "repo_path": "/home/delorenj/code/voxxy",
   "ticket_provider": {
     "type": "plane",
@@ -15,5 +14,6 @@
       "role": "pm",
       "role_dir": "agents/hermes/pm"
     }
-  }
+  },
+  "project_id": "voxxy"
 }
