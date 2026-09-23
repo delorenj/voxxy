@@ -8,9 +8,12 @@
 #   workspace: <workspace-slug>      (or env PLANE_WORKSPACE)
 #   board_id:  <project-uuid>        (set by create_board / 42-ticket-provider)
 #   timezone:  <IANA timezone>       optional project calendar override
-# Normalized state names come from role.yaml `ticket_provider:`. Custom targets
-# are required there and are resolved by exact name in their expected group.
-
+#   state_map: { started: "In Progress", in_review: "In Review",
+#                completed: "Done", cancelled: "Cancelled" }   optional
+#   Optional extended targets, enabled per role by naming their lane:
+#     awaiting_decision (default "Needs Attention"), e2e_testing,
+#     ready_for_documentation, needs_re_evaluation
+#
 # Rate limiting: reads retry HTTP 429 up to PLANE_READ_MAX_ATTEMPTS (default 4)
 # times, sleeping the server's Retry-After capped at PLANE_429_MAX_DELAY
 # (default 30s). Mutations are never retried in the transport layer, and
@@ -31,6 +34,24 @@ OP="${1:-}"; shift 2>/dev/null || true
 ROLE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 ROLE_YAML="$ROLE_DIR/role.yaml"
 BASE="${PLANE_BASE:-https://plane.delo.sh}"
+
+# Managed/shadow execution owns every mutation; stop before credential fallback.
+EXECUTION_MODE="$(python3 - "$ROLE_DIR" <<'PYMODE'
+import json, pathlib, sys
+for parent in [pathlib.Path(sys.argv[1]), *pathlib.Path(sys.argv[1]).parents]:
+    path=parent/'.project.json'
+    if path.exists():
+        print(json.loads(path.read_text()).get('execution',{}).get('mode','legacy')); break
+PYMODE
+)"
+case "$EXECUTION_MODE" in
+  managed|shadow)
+    case "$OP" in
+      resolve|describe_board|list_issues|list_states|list_labels|active_milestone|get_issue) ;;
+      *) echo "plane: $EXECUTION_MODE lifecycle writes require px task through Krebs" >&2; exit 78 ;;
+    esac ;;
+esac
+
 
 FLEET_ENV="${HERMES_FLEET_ENV:-$HOME/.hermes/fleet.env}"
 
@@ -131,7 +152,7 @@ SM_CANCELLED="$(tp_cfg cancelled)"; SM_CANCELLED="${SM_CANCELLED:-Cancelled}"
 SM_STARTED="$(tp_cfg started)"
 SM_UNSTARTED="$(tp_cfg unstarted)"
 SM_BACKLOG="$(tp_cfg backlog)"
-SM_AWAITING_DECISION="$(tp_cfg awaiting_decision)"
+SM_AWAITING_DECISION="$(tp_cfg awaiting_decision)"; SM_AWAITING_DECISION="${SM_AWAITING_DECISION:-Needs Attention}"
 SM_E2E_TESTING="$(tp_cfg e2e_testing)"
 SM_READY_FOR_DOCUMENTATION="$(tp_cfg ready_for_documentation)"
 SM_NEEDS_RE_EVALUATION="$(tp_cfg needs_re_evaluation)"
@@ -374,56 +395,50 @@ m=active[0] if active else {}
 print(json.dumps({"id":m.get("id", ""),"name":m.get("name", ""),"state":"active" if m else "inactive"}))'
 }
 
-# Map operator aliases to their canonical configured target. Aliases never own
-# concrete Plane names, so they cannot drift away from role.yaml.
+# Operator aliases -> their canonical normalized target. Aliases never own a
+# concrete lane name, so they cannot drift away from role.yaml.
 canonical_state_target() {
   case "$1" in
-    waiting_reply) printf 'awaiting_decision\n' ;;
+    needs_attention|waiting_reply) printf 'awaiting_decision\n' ;;
     ready_for_e2e) printf 'e2e_testing\n' ;;
     *) printf '%s\n' "$1" ;;
   esac
 }
 
-# Resolve a normalized state to exactly one concrete Plane state. Configured
-# names must be globally unique and belong to the expected Plane group. The
-# original six neutral targets retain their single-member group fallback.
+# Map a normalized state -> exactly one concrete Plane state, printed as JSON
+# {id,state,state_type,normalized}. A configured name must exist in the
+# expected group; it never falls back to another state in the same group. An
+# unnamed group is safe only when the group has one member. The extended
+# targets exist only when role.yaml names their lane.
 resolve_state_target() {
-  requested="$1"
-  want="$(canonical_state_target "$requested")"
+  want="$(canonical_state_target "$1")"
   [ -n "$PROJ" ] || die "ticket_provider.project not set"
   case "$want" in
-    completed)               grp=completed; nm="$SM_DONE" ;;
-    cancelled)               grp=cancelled; nm="$SM_CANCELLED" ;;
-    in_review)               grp=started;   nm="$SM_IN_REVIEW" ;;
-    started)                 grp=started;   nm="$SM_STARTED" ;;
-    unstarted)               grp=unstarted; nm="$SM_UNSTARTED" ;;
-    backlog)                 grp=backlog;   nm="$SM_BACKLOG" ;;
+    completed) grp=completed; nm="$SM_DONE" ;;
+    cancelled) grp=cancelled; nm="$SM_CANCELLED" ;;
+    in_review) grp=started;   nm="$SM_IN_REVIEW" ;;
+    started)   grp=started;   nm="$SM_STARTED" ;;
+    unstarted) grp=unstarted; nm="$SM_UNSTARTED" ;;
+    backlog)   grp=backlog;   nm="$SM_BACKLOG" ;;
     awaiting_decision)       grp=started;   nm="$SM_AWAITING_DECISION" ;;
     e2e_testing)             grp=started;   nm="$SM_E2E_TESTING" ;;
     ready_for_documentation) grp=started;   nm="$SM_READY_FOR_DOCUMENTATION" ;;
     needs_re_evaluation)     grp=unstarted; nm="$SM_NEEDS_RE_EVALUATION" ;;
     *) die "invalid normalized state: $want" ;;
   esac
-
   case "$want" in
     awaiting_decision|e2e_testing|ready_for_documentation|needs_re_evaluation)
       [ -n "$nm" ] || die "ticket_provider.$want is required in role.yaml"
       ;;
   esac
-
   api_all "projects/$PROJ/states/" | GRP="$grp" NM="$nm" WANT="$want" python3 -c 'import sys,json,os
 d=json.load(sys.stdin); rows=d if isinstance(d,list) else d.get("results", []) if isinstance(d,dict) else []
 grp=os.environ["GRP"]; nm=os.environ.get("NM","").strip(); want=os.environ["WANT"]
 grouped=[s for s in rows if s.get("group")==grp]
 if nm:
-    candidates=[s for s in rows if str(s.get("name","")).strip().casefold()==nm.casefold()]
-    if not candidates:
-        raise SystemExit(f"plane: configured Plane state {nm!r} for normalized {want!r} was not found")
+    candidates=[s for s in grouped if str(s.get("name","")).strip().casefold()==nm.casefold()]
     if len(candidates) != 1:
-        raise SystemExit(f"plane: configured Plane state {nm!r} for normalized {want!r} is ambiguous ({len(candidates)} exact matches)")
-    actual_group=str(candidates[0].get("group") or "")
-    if actual_group != grp:
-        raise SystemExit(f"plane: configured Plane state {nm!r} for normalized {want!r} is in group {actual_group!r}, expected {grp!r}")
+        raise SystemExit(f"plane: exact Plane state {nm!r} for normalized {want!r} was not resolved uniquely in group {grp!r}")
 else:
     candidates=grouped
     if len(candidates) != 1:
@@ -460,14 +475,15 @@ except Exception: print("")')"
       "$PROJ" "$BASE" "$WS" "$PROJ" "$LIVE_IDENTIFIER"
     ;;
 
-  resolve_state)
-    TARGET="${1:?usage: resolve_state <normalized-state>}"
-    resolve_state_target "$TARGET"
-    ;;
-
   active_milestone)
     [ -n "$PROJ" ] || die "project not set"
     api_all "projects/$PROJ/cycles/" | current_cycle
+    ;;
+
+  resolve_state)
+    # Read-only validation of a configured transition target; never mutates.
+    TARGET="${1:?usage: resolve_state <normalized-state>}"
+    resolve_state_target "$TARGET"
     ;;
 
   list_issues)

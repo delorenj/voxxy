@@ -6,21 +6,15 @@ set -euo pipefail
 ROLE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ROLE_YAML="$ROLE_DIR/role.yaml"
 
+# The block-scoped walker _lib.sh's yaml_get uses (lib/role-yaml.py). This
+# launcher is the gateway's ExecStart, so it calls the reader directly instead
+# of sourcing _lib.sh and its fleet environment. The regex reader it replaces
+# ended a block at the first blank line and kept trailing comments.
+ROLE_YAML_READER="$ROLE_DIR/.scripts/lib/role-yaml.py"
+[[ -f "$ROLE_YAML_READER" && ! -L "$ROLE_YAML_READER" ]] \
+  || { printf 'credential-launch: trusted role.yaml reader is unavailable\n' >&2; exit 1; }
 yaml_get() {
-  python3 - "$ROLE_YAML" "$1" <<'PYEOF'
-import re, sys
-from pathlib import Path
-text = Path(sys.argv[1]).read_text()
-parts = sys.argv[2].split(".")
-if len(parts) == 2:
-    match = re.search(
-        rf"(?m)^{re.escape(parts[0])}:[ \t]*\n((?:[ \t]+\S.*\n?)*)", text
-    )
-    text = match.group(1) if match else ""
-key = parts[-1]
-match = re.search(rf'(?m)^\s*{re.escape(key)}:\s*"?([^"\n]*)"?\s*$', text)
-print(match.group(1).strip() if match else "")
-PYEOF
+  python3 "$ROLE_YAML_READER" "$ROLE_YAML" "$1"
 }
 
 AGENT_ID="$(yaml_get agent_id)"
@@ -45,6 +39,11 @@ if ! REPO_ROOT="$(git -C "$ROLE_DIR" rev-parse --show-toplevel 2>/dev/null)"; th
 fi
 export TERMINAL_CWD="$REPO_ROOT"
 
+# Do not forward a stale/raw channel value inherited from the service manager,
+# login shell, or a legacy runtime EnvironmentFile. Hermes hydrates the named
+# profile's validated 1Password references after this launcher execs it.
+unset TELEGRAM_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN
+
 load_credential() {
   local credential_id="$1" env_name="$2" credential_file value
   [[ "$env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] \
@@ -57,7 +56,6 @@ load_credential() {
   unset value
 }
 
-load_credential telegram_bot_token TELEGRAM_BOT_TOKEN
 MODEL_KEY_ENV="$(yaml_get model.key_env)"
 if [[ -n "$MODEL_KEY_ENV" ]]; then
   load_credential model_api_key "$MODEL_KEY_ENV"

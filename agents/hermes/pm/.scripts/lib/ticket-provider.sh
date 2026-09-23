@@ -23,8 +23,12 @@
 #                                     backlog|unstarted|started|in_review|completed|
 #                                     cancelled|awaiting_decision|e2e_testing|
 #                                     ready_for_documentation|needs_re_evaluation;
-#                                    waiting_reply and ready_for_e2e are aliases
-#                                    for awaiting_decision and e2e_testing.
+#                                    needs_attention/waiting_reply and
+#                                    ready_for_e2e are aliases for
+#                                    awaiting_decision and e2e_testing.
+#                                    The four extended targets are enabled
+#                                    per role by naming their lane in
+#                                    role.yaml ticket_provider:.
 #   create_board <name> <id> <d>  -> JSON {board_id, board_url}
 #   describe_board <ws> <board_id>
 #                                 -> JSON {board_id, identifier, workspace,
@@ -208,10 +212,14 @@ tp() {
 }
 
 # Normalized states the engine reasons in. Adapters map these to provider terms.
-# waiting_reply and ready_for_e2e are implemented by linear.sh and trello.sh
-# only; listing them here would let tp_is_valid_state pass a state plane.sh
-# then rejects deeper with a worse message. This repo is bound to plane.
-TP_STATES="backlog unstarted started in_review completed cancelled awaiting_decision e2e_testing ready_for_documentation needs_re_evaluation"
+# The six neutral states every board has, then the four optional extended
+# targets. An extended target is enabled per role: it resolves only when that
+# role's role.yaml `ticket_provider:` block names its concrete lane, and the
+# provider refuses it with "ticket_provider.<state> is required" otherwise
+# (plane.sh defaults awaiting_decision to "Needs Attention"). The last three are
+# aliases: needs_attention/waiting_reply -> awaiting_decision, ready_for_e2e ->
+# e2e_testing.
+TP_STATES="backlog unstarted started in_review completed cancelled awaiting_decision e2e_testing ready_for_documentation needs_re_evaluation needs_attention waiting_reply ready_for_e2e"
 
 tp_is_valid_state() {
   case " $TP_STATES " in
