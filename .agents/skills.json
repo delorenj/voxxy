@@ -3,277 +3,55 @@
   "inherit_global": true,
   "registry": "https://github.com/delorenj/skillex.git",
   "skills": [
-    {
-      "name": "33god-agent-fleet-operations",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/33god-agent-fleet-operations"
-    },
-    {
-      "name": "agent-config-fanout",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/agent-config-fanout"
-    },
-    {
-      "name": "agent-fleet-operations",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/agent-fleet-operations"
-    },
-    {
-      "name": "agent-token-efficiency",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/agent-token-efficiency"
-    },
-    {
-      "name": "agent-workspace-linux",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/agent-workspace-linux"
-    },
-    {
-      "name": "artifact-template-client-profile-sheet",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/artifact-template-client-profile-sheet"
-    },
-    {
-      "name": "blog-writing",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/blog-writing"
-    },
-    {
-      "name": "bloodbank-integration",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/bloodbank-integration"
-    },
-    {
-      "name": "bloodbank-sdk-generation",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/bloodbank-sdk-generation"
-    },
-    {
-      "name": "brule-method",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/brule-method"
-    },
-    {
-      "name": "building-native-ui",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/building-native-ui"
-    },
-    {
-      "name": "cloudflare",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/cloudflare"
-    },
-    {
-      "name": "code-reviewer",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/code-reviewer"
-    },
-    {
-      "name": "coding-strategy",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/coding-strategy"
-    },
-    {
-      "name": "context-optimizer",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/context-optimizer"
-    },
-    {
-      "name": "delonet-daily-report",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/delonet-daily-report"
-    },
-    {
-      "name": "design-md",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/design-md"
-    },
-    {
-      "name": "docs-changelog",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/docs-changelog"
-    },
-    {
-      "name": "docs-writer",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/docs-writer"
-    },
-    {
-      "name": "domain-triage",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/domain-triage"
-    },
-    {
-      "name": "ego-browser",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/ego-browser"
-    },
-    {
-      "name": "event-driven-architecture",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/event-driven-architecture"
-    },
-    {
-      "name": "fal-text-to-image",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/fal-text-to-image"
-    },
-    {
-      "name": "find-skills",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/find-skills"
-    },
-    {
-      "name": "folder-curator",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/folder-curator"
-    },
-    {
-      "name": "frontmatter-enrichment",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/frontmatter-enrichment"
-    },
-    {
-      "name": "hallmark",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/hallmark"
-    },
-    {
-      "name": "hermes-pm-template-maintenance",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/hermes-pm-template-maintenance"
-    },
-    {
-      "name": "high-end-visual-design",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/high-end-visual-design"
-    },
-    {
-      "name": "hindsight-maintenance",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/hindsight-maintenance"
-    },
-    {
-      "name": "html-project-console",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/html-project-console"
-    },
-    {
-      "name": "hyperframes",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/hyperframes"
-    },
-    {
-      "name": "knowledge",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/knowledge"
-    },
-    {
-      "name": "mental-model-jotting",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/mental-model-jotting"
-    },
-    {
-      "name": "mise-task-managing",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/mise-task-managing"
-    },
-    {
-      "name": "mise-tasks",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/mise-tasks"
-    },
-    {
-      "name": "mise-versioning",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/mise-versioning"
-    },
-    {
-      "name": "momo",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/momo"
-    },
-    {
-      "name": "pm2",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/pm2"
-    },
-    {
-      "name": "pr-address-comments",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/pr-address-comments"
-    },
-    {
-      "name": "pr-creator",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/pr-creator"
-    },
-    {
-      "name": "project-jangler",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/project-jangler"
-    },
-    {
-      "name": "project-lifecycle",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/project-lifecycle"
-    },
-    {
-      "name": "projects",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/projects"
-    },
-    {
-      "name": "review-duplication",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/review-duplication"
-    },
-    {
-      "name": "shared",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/shared"
-    },
-    {
-      "name": "skf-analyze-source",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-analyze-source"
-    },
-    {
-      "name": "skf-audit-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-audit-skill"
-    },
-    {
-      "name": "skf-brief-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-brief-skill"
-    },
-    {
-      "name": "skf-create-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-create-skill"
-    },
-    {
-      "name": "skf-create-stack-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-create-stack-skill"
-    },
-    {
-      "name": "skf-drop-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-drop-skill"
-    },
-    {
-      "name": "skf-export-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-export-skill"
-    },
-    {
-      "name": "skf-forger",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-forger"
-    },
-    {
-      "name": "skf-quick-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-quick-skill"
-    },
-    {
-      "name": "skf-refine-architecture",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-refine-architecture"
-    },
-    {
-      "name": "skf-rename-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-rename-skill"
-    },
-    {
-      "name": "skf-setup",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-setup"
-    },
-    {
-      "name": "skf-test-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-test-skill"
-    },
-    {
-      "name": "skf-update-skill",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-update-skill"
-    },
-    {
-      "name": "skf-verify-stack",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/skf-verify-stack"
-    },
-    {
-      "name": "spa-host",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/spa-host"
-    },
-    {
-      "name": "stitch-design",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/stitch-design"
-    },
-    {
-      "name": "stitch-loop",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/stitch-loop"
-    },
-    {
-      "name": "task-triage",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/task-triage"
-    },
-    {
-      "name": "taste-design",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/taste-design"
-    },
-    {
-      "name": "taxonomy-steward",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/taxonomy-steward"
-    },
-    {
-      "name": "vox-tts",
-      "source": "file:///home/delorenj/code/voxxy/.agents/skills.bak/vox-tts"
-    }
+    "agent-fleet-operations",
+    "agent-config-fanout",
+    "agent-token-efficiency",
+    "agent-workspace-linux",
+    "artifact-template-client-profile-sheet",
+    "blog-writing",
+    "bloodbank-integration",
+    "bloodbank-sdk-generation",
+    "brule-method",
+    "building-native-ui",
+    "cloudflare",
+    "code-reviewer",
+    "coding-strategy",
+    "context-optimizer",
+    "delonet-daily-report",
+    "design-md",
+    "docs-changelog",
+    "docs-writer",
+    "domain-triage",
+    "ego-browser",
+    "event-driven-architecture",
+    "fal-text-to-image",
+    "find-skills",
+    "folder-curator",
+    "frontmatter-enrichment",
+    "hallmark",
+    "hermes-pm-template-maintenance",
+    "high-end-visual-design",
+    "hindsight-maintenance",
+    "html-project-console",
+    "hyperframes",
+    "mental-model-jotting",
+    "mise-task-managing",
+    "mise-tasks",
+    "mise-versioning",
+    "momo",
+    "pm2",
+    "pr-address-comments",
+    "pr-creator",
+    "project-jangler",
+    "project-lifecycle",
+    "projects",
+    "review-duplication",
+    "spa-host",
+    "stitch-design",
+    "stitch-loop",
+    "task-triage",
+    "taste-design",
+    "taxonomy-steward",
+    "vox-tts"
   ]
 }
