@@ -7,7 +7,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic>=2",
-    "voxcpm==2.0.2",
+    "voxcpm==2.0.3",
     "torch>=2.5.0,<2.7",
     "torchaudio>=2.5.0,<2.7",
     "soundfile",
