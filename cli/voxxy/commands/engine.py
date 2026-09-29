@@ -36,16 +36,13 @@ from rich.table import Table
 
 from voxxy.client import VoxClient, VoxNotFound, VoxUnreachable, VoxServerError
 from voxxy.config import discover_project_root, load_config
-from voxxy.docker import DockerError, compose_up, ensure_op_authed, logs_follow
+from voxxy.docker import DockerError, compose_up, ensure_op_authed, logs_follow, stop_container
 from voxxy.state import State, load_state, save_state
 
 console = Console()
 
 # Compose-default VOX_ENGINES value (mirrors compose.yml).
-DEFAULT_VOX_ENGINES = (
-    "voxcpm=http://voxxy-engine-voxcpm:8000,"
-    "vibevoice=http://voxxy-engine-vibevoice:8000"
-)
+DEFAULT_VOX_ENGINES = "vibevoice=http://voxxy-engine-vibevoice:8000"
 
 # Hard-coded URL map for the two known local engine sidecars.
 ENGINE_URLS: dict[str, str] = {
@@ -298,11 +295,11 @@ def engine_logs(
 def engine_use(
     name: str = typer.Argument(..., help="Engine to promote to primary position."),
 ) -> None:
-    """Reorder the engine chain so <name> is tried first.
+    """Switch active local engine to <name>.
 
-    Validates the engine exists in /healthz, updates .voxxy.state.json, and
-    recreates voxxy-core to pick up the new VOX_ENGINES order. Polls /healthz
-    until the named engine is confirmed as primary (position 0) and ready.
+    Local engines are mutually exclusive to conserve GPU VRAM: switching to <name>
+    stops the other local engine sidecar, starts <name>'s container, and recreates
+    voxxy-core with <name> as the single active engine.
     """
     if name in INTERNAL_ENGINE_NAMES:
         typer.secho(
@@ -313,20 +310,9 @@ def engine_use(
         )
         raise typer.Exit(code=1)
 
-    cfg = load_config()
-    client = VoxClient(cfg.default_url)
-
-    # Validate engine exists in /healthz.
-    try:
-        hc = client.healthz()
-    except VoxUnreachable as exc:
-        typer.secho(f"unreachable: {exc}", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=3)
-
-    available = [e.name for e in hc.engines if e.name not in INTERNAL_ENGINE_NAMES]
-    if name not in available:
+    if name not in ENGINE_URLS:
         typer.secho(
-            f"engine '{name}' not found; available: {', '.join(available)}",
+            f"Unknown engine '{name}'. Known local engines: {', '.join(sorted(ENGINE_URLS))}",
             fg=typer.colors.RED,
             err=True,
         )
@@ -340,23 +326,40 @@ def engine_use(
 
     current_pairs = _current_engines(project_root)
     target_url = _url_for(name)
-
-    # Build new chain: <name>=URL first, then the others in original order.
-    new_pairs = [(name, target_url)]
-    for n, u in current_pairs:
-        if n != name:
-            new_pairs.append((n, u))
-
-    # If <name> wasn't in the chain before, it's now at position 0; that's fine.
     old_primary = current_pairs[0][0] if current_pairs else "(none)"
-    new_engines_str = _render_vox_engines(new_pairs)
 
     console.print(
-        f"[bold]Reordering engine chain:[/bold] "
-        f"[cyan]{old_primary}[/cyan] → [cyan]{name}[/cyan] (primary)"
+        f"[bold]Switching active engine:[/bold] "
+        f"[cyan]{old_primary}[/cyan] → [cyan]{name}[/cyan]"
     )
 
+    # Bring down conflicting local engines
+    for other in ENGINE_URLS:
+        if other != name:
+            console.print(f"  [dim]Bringing down voxxy-engine-{other}...[/dim]")
+            stop_container(f"voxxy-engine-{other}")
+
+    # Bring up the target engine container
+    console.print(f"  [dim]Bringing up voxxy-engine-{name}...[/dim]")
+    try:
+        compose_up(
+            project_root,
+            full=True,
+            services=[f"voxxy-engine-{name}"],
+            no_build=True,
+        )
+    except DockerError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    # Mutually exclusive: active local chain contains only this engine
+    new_pairs = [(name, target_url)]
+    new_engines_str = _render_vox_engines(new_pairs)
+
     _recreate_core(project_root, new_engines_str, f"engine use {name}")
+
+    cfg = load_config()
+    client = VoxClient(cfg.default_url)
 
     console.print(f"  [dim]Polling until {name} is primary and ready (timeout 60s)...[/dim]")
     ok = _poll_primary(client, expected_primary=name, timeout=60)
@@ -376,67 +379,10 @@ def engine_use(
 
 
 def engine_enable(
-    name: str = typer.Argument(..., help="Engine to add to the synthesis chain."),
+    name: str = typer.Argument(..., help="Engine to switch to."),
 ) -> None:
-    """Add <name> to the engine chain if not already present.
-
-    Appends to the end (before the implicit ElevenLabs fallback). If the engine
-    is already enabled, this is a no-op with a friendly message.
-    """
-    if name in INTERNAL_ENGINE_NAMES:
-        typer.secho(
-            f"'{name}' is managed internally by core and cannot be enabled this way.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=1)
-
-    # Validate the engine name is known (we need a URL for it).
-    _url_for(name)  # Raises Exit(1) if unknown.
-
-    cfg = load_config()
-    client = VoxClient(cfg.default_url)
-
-    try:
-        project_root = discover_project_root()
-    except Exception as exc:
-        typer.secho(str(exc), fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-
-    current_pairs = _current_engines(project_root)
-    current_names = [n for n, _ in current_pairs]
-
-    if name in current_names:
-        console.print(
-            f"[yellow]Engine '{name}' is already enabled.[/yellow] "
-            f"Current chain: {', '.join(current_names)}"
-        )
-        return
-
-    # Append to end.
-    new_pairs = current_pairs + [(name, ENGINE_URLS[name])]
-    new_engines_str = _render_vox_engines(new_pairs)
-
-    console.print(
-        f"[bold]Enabling engine:[/bold] appending [cyan]{name}[/cyan] to chain. "
-        f"New chain: {', '.join(n for n, _ in new_pairs)}"
-    )
-
-    _recreate_core(project_root, new_engines_str, f"engine enable {name}")
-
-    console.print("  [dim]Polling until core is back up (timeout 60s)...[/dim]")
-    ok = _poll_primary(client, expected_primary=None, timeout=60)
-
-    if ok:
-        console.print(f"[green bold]Engine '{name}' enabled.[/green bold]")
-    else:
-        typer.secho(
-            "Timeout: core did not come back within 60s. "
-            "Check `voxxy health` and `docker logs vox`.",
-            fg=typer.colors.RED,
-            err=True,
-        )
-        raise typer.Exit(code=3)
+    """Switch active engine to <name> (mutually exclusive with other engines)."""
+    engine_use(name)
 
 
 def engine_disable(
@@ -499,6 +445,9 @@ def engine_disable(
         f"[bold]Disabling engine:[/bold] removing [cyan]{name}[/cyan] from chain. "
         f"New chain: {', '.join(n for n, _ in new_pairs) or '(empty — ElevenLabs only)'}"
     )
+
+    console.print(f"  [dim]Stopping voxxy-engine-{name}...[/dim]")
+    stop_container(f"voxxy-engine-{name}")
 
     _recreate_core(project_root, new_engines_str, f"engine disable {name}")
 

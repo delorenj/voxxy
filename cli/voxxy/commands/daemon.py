@@ -47,23 +47,21 @@ from voxxy.docker import (
     container_status,
     ensure_op_authed,
     image_for,
+    stop_container,
 )
+from voxxy.commands.engine import ENGINE_URLS, _parse_vox_engines
 from voxxy.state import load_state
 
 console = Console()
 
 # The compose default when no state has been written yet (mirrors compose.yml).
-DEFAULT_VOX_ENGINES = (
-    "voxcpm=http://voxxy-engine-voxcpm:8000,"
-    "vibevoice=http://voxxy-engine-vibevoice:8000"
-)
+DEFAULT_VOX_ENGINES = "vibevoice=http://voxxy-engine-vibevoice:8000"
 
 # Containers that are part of the full stack (used for status display).
 STACK_CONTAINERS = ["vox", "voxxy-engine-voxcpm", "voxxy-engine-vibevoice"]
 
-# Engines that are NOT ElevenLabs (i.e., local engines that must be ready
-# before `daemon start` declares success).
-LOCAL_ENGINE_NAMES = {"voxcpm", "vibevoice"}
+# Engines that are NOT ElevenLabs (local engine sidecars).
+LOCAL_ENGINE_NAMES = {"vibevoice", "voxcpm"}
 
 
 def register(daemon_app: typer.Typer) -> None:
@@ -86,6 +84,24 @@ def _get_client(project_root: Optional[Path] = None) -> VoxClient:
     return VoxClient(cfg.default_url)
 
 
+def _active_engine(project_root: Optional[Path] = None) -> str:
+    """Return the name of the active local engine (defaults to vibevoice)."""
+    if project_root is not None:
+        try:
+            state = load_state(project_root)
+            if state.vox_engines:
+                pairs = _parse_vox_engines(state.vox_engines)
+                for name, _ in pairs:
+                    if name in LOCAL_ENGINE_NAMES:
+                        return name
+        except Exception:
+            pass
+    # If no state or project_root, inspect running containers:
+    if container_status("voxxy-engine-voxcpm") == "running" and container_status("voxxy-engine-vibevoice") != "running":
+        return "voxcpm"
+    return "vibevoice"
+
+
 def _poll_until_healthy(
     client: VoxClient,
     *,
@@ -93,13 +109,12 @@ def _poll_until_healthy(
     require_engine: Optional[str] = None,
     message: str = "Waiting for stack to become healthy",
 ) -> bool:
-    """Poll /healthz until all local engines are ready (or timeout).
+    """Poll /healthz until the active engine is ready (or timeout).
 
     Args:
         client: VoxClient to use for polling.
         timeout: Maximum seconds to wait.
-        require_engine: If set, also assert this engine is first in the list
-                        and ready (used by ``engine use``).
+        require_engine: If set, also assert this engine is ready.
         message: Spinner label shown during wait.
 
     Returns:
@@ -111,27 +126,22 @@ def _poll_until_healthy(
     while time.monotonic() < deadline:
         try:
             hc = client.healthz()
-            local_engines = [e for e in hc.engines if e.name in LOCAL_ENGINE_NAMES]
-            all_local_ready = all(e.ready for e in local_engines)
-
             if require_engine:
-                # Check that the named engine is first and ready.
-                if hc.engines and hc.engines[0].name == require_engine:
-                    target = next((e for e in hc.engines if e.name == require_engine), None)
-                    if target and target.ready:
-                        # Clear spinner line.
-                        console.print(f"\r  {message}: [green]healthy[/green]" + " " * 20)
-                        return True
-                # Not yet in position; keep polling.
-            elif all_local_ready:
-                console.print(f"\r  {message}: [green]healthy[/green]" + " " * 20)
-                return True
+                target = next((e for e in hc.engines if e.name == require_engine), None)
+                if target and target.ready:
+                    console.print(f"\r  {message}: [green]healthy[/green]" + " " * 20)
+                    return True
+            else:
+                # With mutually exclusive engines, any ready local engine is healthy
+                local_engines = [e for e in hc.engines if e.name in LOCAL_ENGINE_NAMES]
+                if local_engines and any(e.ready for e in local_engines):
+                    console.print(f"\r  {message}: [green]healthy[/green]" + " " * 20)
+                    return True
 
         except (VoxUnreachable, VoxServerError, VoxNotFound):
             pass  # 502/503/404 while restarting (Traefik re-registering); keep polling.
 
         ch = spinner_chars[i % len(spinner_chars)]
-        # Use print with \r and end="" for spinner-in-place; Rich print adds newline.
         print(f"\r  {ch} {message} …", end="", flush=True)
         i += 1
         time.sleep(2)
@@ -185,16 +195,26 @@ def daemon_start(
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
+    active_engine = _active_engine(project_root)
     vox_engines = _engines_from_state(project_root)
+    if not vox_engines:
+        vox_engines = f"{active_engine}={ENGINE_URLS[active_engine]}"
     engine_env: dict[str, str] = {"VOX_ENGINES": vox_engines}
 
+    # Bring down conflicting local engines
+    for other in LOCAL_ENGINE_NAMES:
+        if other != active_engine:
+            stop_container(f"voxxy-engine-{other}")
+
+    target_engine_service = f"voxxy-engine-{active_engine}"
+
     if engines_only:
-        console.print("[bold]Starting engine sidecars only...[/bold]")
+        console.print(f"[bold]Starting engine sidecar ({active_engine})...[/bold]")
         try:
             compose_up(
                 project_root,
                 full=True,
-                services=["voxxy-engine-voxcpm", "voxxy-engine-vibevoice"],
+                services=[target_engine_service],
                 recreate=force_recreate,
                 env=engine_env,
                 no_build=no_rebuild,
@@ -202,14 +222,16 @@ def daemon_start(
         except DockerError as exc:
             typer.secho(str(exc), fg=typer.colors.RED, err=True)
             raise typer.Exit(code=1)
-        console.print("[green]Engine sidecars started.[/green]")
+        console.print(f"[green]Engine sidecar ({active_engine}) started.[/green]")
         return
 
-    console.print("[bold]Starting voxxy stack...[/bold]")
+    console.print(f"[bold]Starting voxxy stack ({active_engine})...[/bold]")
+    services = ["vox"] if core_only else ["vox", target_engine_service]
     try:
         compose_up(
             project_root,
             full=not core_only,
+            services=services,
             recreate=force_recreate,
             env=engine_env,
             no_build=no_rebuild,
@@ -218,9 +240,14 @@ def daemon_start(
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    console.print("[bold]Polling /healthz (timeout 180s)...[/bold]")
+    console.print(f"[bold]Polling /healthz (timeout 180s)...[/bold]")
     client = _get_client(project_root)
-    ok = _poll_until_healthy(client, timeout=180, message="Waiting for local engines")
+    ok = _poll_until_healthy(
+        client,
+        timeout=180,
+        require_engine=None if core_only else active_engine,
+        message=f"Waiting for {active_engine if not core_only else 'core'}",
+    )
 
     if ok:
         console.print("[green bold]Stack is healthy.[/green bold]")
@@ -336,17 +363,24 @@ def daemon_status(
     except (VoxUnreachable, VoxServerError, VoxNotFound):
         overall_reachable = False
 
+    try:
+        project_root = discover_project_root()
+    except Exception:
+        project_root = None
+    active_engine = _active_engine(project_root)
+    active_container = f"voxxy-engine-{active_engine}"
+
     if wait_healthy:
         deadline = time.monotonic() + timeout
         spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
         i = 0
         while time.monotonic() < deadline:
-            all_running = all(
-                container_states[n] == "running" for n in STACK_CONTAINERS
+            essential_running = (
+                container_states.get("vox") == "running"
+                and container_states.get(active_container) == "running"
             )
-            if all_running and overall_reachable and all(
-                engine_health.get(e, False) for e in LOCAL_ENGINE_NAMES
-            ):
+            active_ready = engine_health.get(active_engine, False)
+            if essential_running and overall_reachable and active_ready:
                 break
 
             time.sleep(2)
@@ -376,12 +410,15 @@ def daemon_status(
         print()
 
     # --- Derive overall status ---
-    all_running = all(container_states[n] == "running" for n in STACK_CONTAINERS)
+    essential_running = (
+        container_states.get("vox") == "running"
+        and container_states.get(active_container) == "running"
+    )
+    active_ready = engine_health.get(active_engine, False)
+
     if not overall_reachable:
         overall_status = "unreachable"
-    elif all_running and all(
-        engine_health.get(e, False) for e in LOCAL_ENGINE_NAMES
-    ):
+    elif essential_running and active_ready:
         overall_status = "ok"
     else:
         overall_status = "degraded"
@@ -418,8 +455,11 @@ def daemon_status(
 
         for name in STACK_CONTAINERS:
             state = container_states[name]
+            is_active = (name == "vox" or name == active_container)
             if state == "running":
                 state_str = "[green]running[/green]"
+            elif not is_active and state in ("exited", "missing"):
+                state_str = "[dim]standby[/dim]"
             elif state == "missing":
                 state_str = "[red]missing[/red]"
             else:
@@ -431,7 +471,9 @@ def daemon_status(
                 health_str = "[green]ok[/green]" if overall_reachable else "[red]unreachable[/red]"
             else:
                 eng_name = name.replace("voxxy-engine-", "")
-                if not overall_reachable:
+                if not is_active:
+                    health_str = "[dim]standby[/dim]"
+                elif not overall_reachable:
                     health_str = "[dim]unreachable[/dim]"
                 elif eng_name in engine_health:
                     health_str = "[green]ready[/green]" if engine_health[eng_name] else "[red]not ready[/red]"
@@ -445,7 +487,7 @@ def daemon_status(
     # Determine exit code.
     if not overall_reachable:
         raise typer.Exit(code=3)
-    if not all_running:
+    if not essential_running:
         raise typer.Exit(code=2)
 
 

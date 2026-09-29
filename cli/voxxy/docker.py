@@ -168,6 +168,21 @@ def container_status(name: str) -> str:
     return result.stdout.strip()
 
 
+def stop_container(name: str) -> bool:
+    """Stop a container if it is currently running.
+
+    Returns True if stopped, False if missing or not running.
+    """
+    if container_status(name) == "running":
+        result = subprocess.run(
+            ["docker", "stop", name],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+    return False
+
+
 def logs_follow(container_name: str) -> None:
     """Replace the current process with `docker logs -f <container>`.
 

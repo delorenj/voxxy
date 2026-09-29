@@ -22,11 +22,9 @@ services:
       VOX_DEFAULT_SINK: ${VOX_DEFAULT_SINK:-}
       # Engine registry: ordered list of name=url pairs. Core tries them in
       # order; first success wins. ElevenLabs is always appended in-process
-      # and self-disables without ELEVENLABS_API_KEY. Default stack assumes
-      # both sidecars from compose.engines.yml are up; override via the env
-      # to reorder (e.g. make vibevoice primary) or drop engines you aren't
-      # running.
-      VOX_ENGINES: ${VOX_ENGINES:-voxcpm=http://voxxy-engine-voxcpm:8000,vibevoice=http://voxxy-engine-vibevoice:8000}
+      # and self-disables without ELEVENLABS_API_KEY. Default stack uses
+      # vibevoice; local engines are mutually exclusive to conserve GPU VRAM.
+      VOX_ENGINES: ${VOX_ENGINES:-vibevoice=http://voxxy-engine-vibevoice:8000}
       ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
       ELEVENLABS_DEFAULT_VOICE: ${ELEVENLABS_DEFAULT_VOICE:-pNInz6obpgDQGcFmaJgB}
     volumes:

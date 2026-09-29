@@ -17,6 +17,7 @@
 
 services:
   voxxy-engine-voxcpm:
+    profiles: ["voxcpm"]
     build: ./engines/voxcpm
     container_name: voxxy-engine-voxcpm
     restart: unless-stopped
@@ -52,6 +53,7 @@ services:
     # definition here would override, so we leave it alone.
 
   voxxy-engine-vibevoice:
+    profiles: ["vibevoice"]
     build: ./engines/vibevoice
     container_name: voxxy-engine-vibevoice
     restart: unless-stopped
