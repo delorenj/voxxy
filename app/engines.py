@@ -180,9 +180,13 @@ class RemoteEngineClient:
         name: str,
         base_url: str,
         *,
-        timeout: float = 60.0,
+        timeout: float | None = None,
         health_timeout: float = 2.0,
     ) -> None:
+        if timeout is None:
+            # Local GPU engines can take minutes on a long utterance when the
+            # card is shared; a short cap silently falls through to ElevenLabs.
+            timeout = float(os.environ.get("VOX_ENGINE_TIMEOUT_SECONDS", "240"))
         self.name = name
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
