@@ -182,6 +182,25 @@ def speak(
     if via_host and _via_is_local(via_host):
         via_host = None
 
+    client = VoxClient(base_url)
+
+    # A live sink outranks --via / $VOX_REMOTE_HOST: the sink is where the human
+    # is listening, and it only needs the public URL, whereas --via needs an ssh
+    # path to the stack host (which can be down, or itself unable to reach vox).
+    # With no listener this returns False untouched and we fall through to
+    # --via / local playback.
+    try:
+        if mode == "play" and sink_key and _speak_to_sink(
+            client, sink_key, text_str, voice_name, cfg_value, steps, player_bin
+        ):
+            return
+    except VoxUnreachable as exc:
+        typer.secho(f"unreachable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=3)
+    except VoxError as exc:
+        typer.secho(f"synth failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
     # --via: delegate WAV fetch to the remote host. Text is piped on stdin so
     # quoting quirks stay the remote's problem, same as the bash original.
     if via_host:
@@ -189,14 +208,9 @@ def speak(
         return
 
     # Local path.
-    client = VoxClient(base_url)
     try:
         if mode == "out":
             _speak_to_file(client, text_str, voice_name, cfg_value, steps, out)
-        elif mode == "play" and sink_key and _speak_to_sink(
-            client, sink_key, text_str, voice_name, cfg_value, steps, player_bin
-        ):
-            pass  # delivered to (or played on behalf of) the sink
         else:
             wav_bytes = _fetch_wav(client, text_str, voice_name, cfg_value, steps)
             if mode == "raw":
