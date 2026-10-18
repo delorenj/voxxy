@@ -143,7 +143,7 @@ class VoxClient:
         self,
         base_url: str,
         *,
-        timeout: float = 30.0,
+        timeout: float = 120.0,
         api_key: str | None | object = _USE_ENV,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
