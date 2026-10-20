@@ -52,5 +52,10 @@
     "taste-design",
     "taxonomy-steward",
     "vox-tts"
+  ],
+  "exclude": [
+    "bmad-build",
+    "bmad-build-auto",
+    "bmad-project-context"
   ]
 }
