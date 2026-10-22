@@ -334,6 +334,30 @@ def _fetch_voice_record(base: str, voice: str, api_key: Optional[str], timeout: 
     return record
 
 
+def _fetch_bounded(base: str, voice: str, api_key: Optional[str], timeout: float) -> Dict[str, Any]:
+    """``_fetch_voice_record`` under a wall-clock deadline.
+
+    urllib's timeout covers connect and each socket read but not DNS resolution or a slow drip, so
+    the lookup runs on a daemon thread and is abandoned after ``timeout`` seconds.
+    """
+    box: Dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            box["value"] = _fetch_voice_record(base, voice, api_key, timeout)
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+            box["error"] = exc
+
+    worker = threading.Thread(target=_run, name="voice-persona-voxxy", daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        raise TimeoutError(f"no answer within {timeout:g}s")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 def voxxy_persona_for_voice(voice: Any, timeout: float = DEFAULT_VOXXY_TIMEOUT_SECONDS) -> Optional[str]:
     """The voxxy voice record's ``persona`` (a slug or ``"none"``); None when unset or on any failure.
 
@@ -352,7 +376,7 @@ def voxxy_persona_for_voice(voice: Any, timeout: float = DEFAULT_VOXXY_TIMEOUT_S
             return cached[1]
         persona: Optional[str] = None
         try:
-            value = _fetch_voice_record(base, name, api_key, timeout).get("persona")
+            value = _fetch_bounded(base, name, api_key, timeout).get("persona")
             if isinstance(value, str) and (value == PERSONA_NONE or _NAME_RE.match(value)):
                 persona = value
             elif value is not None:
@@ -390,9 +414,14 @@ def resolve_persona(cfg: PersonaConfig, voice: Optional[str], provider: Optional
             _log_once(f"name:{cfg.name}", "voice-persona: no bundled persona %r; speaking original text", cfg.name)
         return persona
     if cfg.auto_from_voice:
+        provider_key = (provider or "").strip().lower()
+        if provider_key == "vox":
+            # The vox TTS provider speaks $VOX_VOICE when it is set (a per-process pin that beats the
+            # shared tts.voice), so that is the voice whose persona matters.
+            voice = os.environ.get("VOX_VOICE", "").strip() or voice
         if not _normalize_voice(voice):
             return None
-        if (provider or "").strip().lower() in ("", "vox"):
+        if provider_key in ("", "vox"):
             slug = voxxy_persona_for_voice(voice, cfg.voxxy_timeout_seconds)
             if slug == PERSONA_NONE:
                 return None

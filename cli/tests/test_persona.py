@@ -128,6 +128,13 @@ class TestConfig:
         assert cfg.default_url == "http://x"
         assert cfg.persona_model == DEFAULT_PERSONA_MODEL and cfg.persona_base_url == DEFAULT_PERSONA_BASE_URL
 
+    def test_config_with_only_persona_keys_keeps_url_and_voice_defaults(self, tmp_path: Path) -> None:
+        # Config is slots=True: Config.default_url is a slot descriptor, not the default string.
+        (tmp_path / "config.toml").write_text('persona_api_key_ref = "op://V/i/credential"\n')
+        cfg = load_config()
+        assert cfg.default_url == "https://vox.delo.sh" and cfg.default_voice == "rick"
+        assert cfg.persona_api_key_ref == "op://V/i/credential"
+
     def test_round_trip(self) -> None:
         save_config(Config(persona_base_url="http://llm/v1", persona_model="m", persona_api_key_ref="op://V/i/credential"))
         cfg = load_config()

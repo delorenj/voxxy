@@ -616,6 +616,8 @@ async def set_voice_persona(name: str, body: VoicePersonaIn) -> VoiceOut:
     """
     assert _repo is not None
     persona = body.persona.strip() if body.persona is not None else None
+    if persona is not None and persona.lower() == PERSONA_NONE:
+        persona = PERSONA_NONE  # consumers compare against the literal 'none'
     if persona is not None and persona != PERSONA_NONE and not PERSONA_RE.match(persona):
         raise HTTPException(422, f"invalid persona {body.persona!r}: expected [A-Za-z0-9][A-Za-z0-9_.-]* or 'none'")
     v = await _repo.set_persona(name, persona)

@@ -91,10 +91,12 @@ def load_config() -> Config:
     if "project_root" in raw:
         project_root = Path(raw["project_root"]).expanduser()
 
+    # Config is slots=True, so `Config.default_url` is a slot descriptor; read defaults off an instance.
+    defaults = Config()
     return Config(
         project_root=project_root,
-        default_url=raw.get("default_url", Config.default_url),
-        default_voice=raw.get("default_voice", Config.default_voice),
+        default_url=raw.get("default_url", defaults.default_url),
+        default_voice=raw.get("default_voice", defaults.default_voice),
         default_sink=raw.get("default_sink") or None,
         persona_base_url=raw.get("persona_base_url") or DEFAULT_PERSONA_BASE_URL,
         persona_model=raw.get("persona_model") or DEFAULT_PERSONA_MODEL,

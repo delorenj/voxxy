@@ -71,12 +71,14 @@ explicitly no persona; anything else = a persona id, the basename of `personas/<
 a voice clip keeps its persona. The server stores the slug only; it never reads persona files.
 
 At speak time (only when `auto_from_voice` is true, a voice is set and the TTS provider is `vox`
-or unspecified) the plugin does `GET {base}/voices/{voice}`:
+or unspecified) the plugin does `GET {base}/voices/{voice}`. With provider `vox` the voice is
+`$VOX_VOICE` when that env pin is set (the `vox` TTS provider speaks it in preference to `tts.voice`),
+else the configured voice:
 
 - base URL: `tts.vox.base_url` from the profile config, else env `VOX_URL`, else `https://vox.delo.sh`
 - auth: `tts.vox.api_key` else env `VOX_API_KEY`, sent as `Authorization: Bearer` and `X-API-Key`
   (same as the `vox` TTS provider)
-- hard timeout `tts.persona.voxxy_timeout_seconds` (default 3); results, including failures and
+- hard wall-clock deadline `tts.persona.voxxy_timeout_seconds` (default 3, covers DNS too); results, including failures and
   "unset", are cached in memory for 60s per (base, voice)
 - any failure (network, 404, bad JSON) is logged once and falls back to the frontmatter mapping;
   a voxxy persona whose file is missing is a no-op (logged once), not a fallback

@@ -54,6 +54,12 @@ def test_set_persona_slug(client: TestClient) -> None:
     assert client.get("/voices/peter").json()["persona"] == "peter-griffin"
 
 
+@pytest.mark.parametrize("spelling", ["None", "NONE", " none "])
+def test_set_persona_none_is_case_normalized(client: TestClient, spelling: str) -> None:
+    r = client.put("/voices/peter/persona", json={"persona": spelling})
+    assert r.status_code == 200 and r.json()["persona"] == "none"
+
+
 def test_set_persona_none_literal_is_stored(client: TestClient) -> None:
     r = client.put("/voices/rick/persona", json={"persona": PERSONA_NONE})
     assert r.status_code == 200 and r.json()["persona"] == "none"

@@ -51,6 +51,7 @@ def vp(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_fetch_voice_record", fake_fetch)
     monkeypatch.delenv("VOX_URL", raising=False)
     monkeypatch.delenv("VOX_API_KEY", raising=False)
+    monkeypatch.delenv("VOX_VOICE", raising=False)
     module._VOXXY_CACHE.clear()
     module.voxxy = voxxy
     module.state = state
@@ -427,6 +428,29 @@ def test_voxxy_timeout_config_clamped(vp) -> None:
     _cfg(vp, voxxy_timeout_seconds=7)
     vp.resolve_persona(vp._persona_config(), "peter", "vox")
     assert vp.voxxy["calls"][0]["timeout"] == 7
+
+
+def test_voxxy_lookup_has_a_hard_deadline(vp, monkeypatch) -> None:
+    # urllib's timeout does not cover DNS or a slow drip: a hung fetch must not hold the hook.
+    _cfg(vp, voxxy_timeout_seconds=0.5)
+    monkeypatch.setattr(vp, "_fetch_voice_record", lambda *a, **k: time.sleep(5))
+    started = time.monotonic()
+    persona = vp.resolve_persona(vp._persona_config(), "peter", "vox")
+    assert time.monotonic() - started < 2.5
+    assert persona.name == "Peter Griffin"  # fell back to frontmatter
+    started = time.monotonic()
+    vp.resolve_persona(vp._persona_config(), "peter", "vox")
+    assert time.monotonic() - started < 0.3  # the failure is cached
+
+
+def test_vox_voice_env_pin_decides_the_voice_for_the_vox_provider(vp, monkeypatch) -> None:
+    # plugins/tts/vox speaks $VOX_VOICE when set, so the persona must follow the pinned voice.
+    _cfg(vp)
+    monkeypatch.setenv("VOX_VOICE", "carlin")
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "George Carlin"
+    assert vp.voxxy["calls"][0]["voice"] == "carlin"
+    # other providers do not read VOX_VOICE
+    assert vp.resolve_persona(vp._persona_config(), "peter", "elevenlabs").name == "Peter Griffin"
 
 
 def test_hook_uses_voxxy_persona_end_to_end(vp) -> None:
