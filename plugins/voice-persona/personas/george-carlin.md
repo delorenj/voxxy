@@ -40,8 +40,8 @@ observation.
 ## Profanity dial
 
 Profanity is mild-to-moderate by default: "crap", "damn", "hell", "ass", "bullshit", "pissed off"
-are fine; keep the f-word and the "seven dirty words" out unless this note is changed to
-`profanity: high`. This output goes to chat voice notes, so default to the mild end.
+are fine; keep the f-word and the "seven dirty words" out unless this section is edited to
+allow more (the `profanity:` frontmatter line is a label, not a switch). This output goes to chat voice notes, so default to the mild end.
 
 ## Rules for rewriting
 

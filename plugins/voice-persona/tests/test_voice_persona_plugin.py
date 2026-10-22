@@ -172,10 +172,10 @@ def test_persona_without_frontmatter_and_cache_invalidation(vp, tmp_path) -> Non
 def test_config_defaults_and_coercion(vp) -> None:
     cfg = vp._persona_config({})
     assert cfg.enabled is False and cfg.auto_from_voice is True
-    assert (cfg.timeout_seconds, cfg.max_ratio, cfg.min_ratio) == (25.0, 1.8, 0.5)
+    assert (cfg.timeout_seconds, cfg.max_ratio, cfg.min_ratio) == (40.0, 1.8, 0.5)
     cfg = vp._persona_config({"tts": {"persona": {"enabled": "yes", "timeout_seconds": "bogus", "max_ratio": "2.5",
                                                   "auto_from_voice": "false"}}})
-    assert cfg.enabled and cfg.timeout_seconds == 25.0 and cfg.max_ratio == 2.5 and cfg.auto_from_voice is False
+    assert cfg.enabled and cfg.timeout_seconds == 40.0 and cfg.max_ratio == 2.5 and cfg.auto_from_voice is False
 
 
 def test_ratio_rejects(vp) -> None:
@@ -272,3 +272,23 @@ def test_response_text_extraction() -> None:
 def test_temperature_from_frontmatter(vp) -> None:
     vp.transform_tts_text(text=SOURCE, voice="peter")
     assert vp.calls[0]["temperature"] == 0.8
+
+
+def test_digit_guard_uses_whole_digit_runs(vp) -> None:
+    assert vp.missing_numbers("Retry 4 times", "Retry 14 times") == ["4"]
+    assert vp.missing_numbers("Ran 1,2,3", "Ran 1, 2, 3") == []
+
+
+def test_inline_preamble_is_stripped_but_content_colons_are_kept(vp) -> None:
+    assert vp.sanitize_output("Sure, here's the rewritten text: Check it out! Backup done.") == "Check it out! Backup done."
+    assert vp.sanitize_output("Here is the version: 4.2.1 is live.") == "Here is the version: 4.2.1 is live."
+
+
+def test_unparseable_frontmatter_is_logged_once(vp, caplog) -> None:
+    import logging
+    raw = "---\nvoices: [unclosed\ntemperature: : :\n---\nBody text."
+    with caplog.at_level(logging.WARNING):
+        meta, body = vp._split_frontmatter(raw)
+        vp._split_frontmatter(raw)
+    assert meta == {} and body.strip() == "Body text."
+    assert sum("frontmatter did not parse" in r.message for r in caplog.records) == 1

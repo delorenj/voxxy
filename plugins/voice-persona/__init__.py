@@ -23,11 +23,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "voice-persona/1"
+PROMPT_VERSION = "voice-persona/2"
 AUX_TASK = "tts_persona"
 PERSONAS_DIR = Path(__file__).resolve().parent / "personas"
 
-DEFAULT_TIMEOUT_SECONDS = 25.0
+# Below core's tts.transform_timeout_seconds (45) so the plugin gives up first; the default aux route
+# (provider auto) is a reasoning model that needs ~18-24s for a handful of sentences.
+DEFAULT_TIMEOUT_SECONDS = 40.0
 DEFAULT_MAX_RATIO = 1.8
 DEFAULT_MIN_RATIO = 0.5
 DEFAULT_TEMPERATURE = 0.7
@@ -37,13 +39,21 @@ RATIO_SLACK_CHARS = 40
 MAX_MISSING_NUMBER_FRACTION = 0.15
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)*")
+_THOUSANDS_RE = re.compile(r"(?<=\d),(?=\d{3}(?!\d))")
+_NUMBER_RE = re.compile(r"\d+(?:\.\d+)?")
 _THINK_RE = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.DOTALL | re.IGNORECASE)
 # A task-preamble line ("Sure, here's the rewritten text:"). Requires a rewrite-ish keyword so a
 # character's own "Here's what happened:" is never mistaken for one.
 _PREAMBLE_RE = re.compile(
     r"^\s*(?:(?:sure|certainly|of course|okay|ok|alright|absolutely|here(?:'s| is| are))\b[^\n]*?"
     r"(?:rewrit|spoken|version|in character|persona|text)[^\n]*?|rewritten[^\n]*?):\s*\n+",
+    re.IGNORECASE,
+)
+# Same preamble on one line ("Sure, here's the rewritten text: Check it out!"). Stricter keywords, since
+# a plain colon is also how a character introduces a fact ("Here's the version: 4.2.1").
+_PREAMBLE_INLINE_RE = re.compile(
+    r"^\s*(?:sure|certainly|of course|okay|ok|alright|absolutely|here(?:'s| is| are))\b[^\n:]*?"
+    r"(?:rewrit|spoken|in character|persona)[^\n:]*?:[ \t]*",
     re.IGNORECASE,
 )
 _WRAP_QUOTES = (('"', '"'), ("'", "'"), ("“", "”"), ("‘", "’"), ("`", "`"))
@@ -176,7 +186,9 @@ def _split_frontmatter(raw: str) -> Tuple[Dict[str, Any], str]:
     try:
         import yaml
         meta = yaml.safe_load(match.group(1)) or {}
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - a bad block must not break speech, but must be visible
+        _log_once(("frontmatter", raw[:80]),
+                  "voice-persona: persona frontmatter did not parse (%s); voices/temperature ignored", exc)
         meta = {}
     return (meta if isinstance(meta, dict) else {}), raw[match.end():]
 
@@ -337,7 +349,10 @@ def _call_with_deadline(messages: List[Dict[str, str]], *, timeout: float, tempe
 def sanitize_output(raw: str) -> str:
     """Strip reasoning blocks, a task preamble, and quotes wrapped around the whole output."""
     text = _THINK_RE.sub("", raw or "").strip()
-    text = _PREAMBLE_RE.sub("", text, count=1).strip()
+    stripped = _PREAMBLE_RE.sub("", text, count=1).strip()
+    if stripped == text:
+        stripped = _PREAMBLE_INLINE_RE.sub("", text, count=1).strip()
+    text = stripped
     for _ in range(2):
         for open_q, close_q in _WRAP_QUOTES:
             if len(text) >= 2 and text.startswith(open_q) and text.endswith(close_q):
@@ -350,12 +365,12 @@ def sanitize_output(raw: str) -> str:
 
 
 def _numbers(text: str) -> List[str]:
-    return [m.replace(",", "") for m in _NUMBER_RE.findall(text or "")]
+    return _NUMBER_RE.findall(_THOUSANDS_RE.sub("", text or ""))
 
 
 def missing_numbers(source: str, rewrite: str) -> List[str]:
-    haystack = (rewrite or "").replace(",", "")
-    return [n for n in _numbers(source) if n not in haystack]
+    present = set(_numbers(rewrite))  # whole digit runs: a source "4" is not satisfied by "14"
+    return [n for n in _numbers(source) if n not in present]
 
 
 def validate_rewrite(source: str, rewrite: str, cfg: PersonaConfig) -> Optional[str]:

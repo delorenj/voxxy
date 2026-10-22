@@ -44,7 +44,7 @@ tts:
     file: PERSONA.md         # OR a path; relative paths resolve against the profile HERMES_HOME
     auto_from_voice: true    # default true: with no name/file, use the bundled persona whose
                              # frontmatter `voices:` contains the configured TTS voice
-    timeout_seconds: 25      # hard bound on the rewrite; on expiry the original text is spoken
+    timeout_seconds: 40      # hard bound on the rewrite; on expiry the original text is spoken
     max_ratio: 1.8           # reject rewrites longer than input*max_ratio (+40 chars) -> original
     min_ratio: 0.5           # reject rewrites shorter than input*min_ratio -> original
 ```
@@ -92,8 +92,10 @@ Before/after pairs whose "after" keeps every fact of the "before".
 The body goes to the model verbatim as the character bible. To write a new persona: copy a bundled
 one, change the bible, keep a "Rules for rewriting" section that names the facts that must survive
 (numbers, names, paths, commands, warnings, action items), and add 2-3 honest before/after examples.
-Bundled personas live in `personas/`; for a private one use `file:`. George Carlin has a profanity
-dial documented in his file (`mild-to-moderate` by default, since the audio goes to Telegram).
+Bundled personas live in `personas/`; for a private one use `file:`. George Carlin's profanity
+level is prose in the "Profanity dial" section of his file (`mild-to-moderate`, since the audio goes
+to Telegram); edit that section to change it. Frontmatter keys other than `name`, `voices`,
+`temperature` and `description` are documentation only.
 
 ## How a rewrite is validated
 
@@ -115,14 +117,16 @@ Nothing is cached to disk; parsed personas are cached in memory by (path, mtime)
 ## Choosing the model for the pass
 
 `tts_persona` is a normal auxiliary task. With nothing configured it follows `provider: auto`, the
-main route. Point it at something cheaper and faster:
+main route (provider `auto`), which on the AutomaticAI gateway is a reasoning model: expect roughly
+18-24s for a 3-4 sentence reply, so the plugin default is `timeout_seconds: 40` (core's own bound is 45)
+and a longer reply can still time out and be spoken unchanged. Pin a faster route per profile if that bites:
 
 ```yaml
 auxiliary:
   tts_persona:
     provider: automaticai
     model: automaticai/personal/glm-5.3-flash   # any fast, non-reasoning model
-    timeout: 25
+    timeout: 40
 ```
 
 Use the configured gateway or provider; never hardcode keys in this plugin.
