@@ -58,6 +58,17 @@ voxxy voice info rick
 voxxy voice add /path/to/clip.wav                # interactive: preprocess + metadata + upload
 voxxy voice add /path/to/clip.wav --name demo --tags demo,male --no-prompt
 voxxy voice delete <name> --yes
+voxxy voice persona peter                        # show voxxy-level persona + effective one (and its source)
+voxxy voice persona peter peter-griffin          # associate a persona with a voice (stored on the server)
+voxxy voice persona peter none                   # explicitly no persona (suppresses the frontmatter default)
+voxxy voice persona peter --clear                # drop the association (back to persona-file `voices:`)
+
+# Personas (plugins/voice-persona/personas/*.md; logic lives in the Hermes plugin, the CLI imports it)
+voxxy persona list                               # bundled personas + which voices map to each
+voxxy persona show peter-griffin [--raw]         # render the persona markdown
+voxxy persona rewrite peter-griffin "text"       # dry-run in-character rewrite (no audio); non-zero + reason if rejected
+voxxy persona rewrite --voice peter "text" --json
+voxxy persona path                               # personas directory
 
 # Synthesis
 voxxy speak "hello"
@@ -66,6 +77,7 @@ voxxy speak --raw "hi" > out.wav                 # WAV to stdout (pipe friendly)
 voxxy speak --out /tmp/foo.ogg "hi"              # OGG/Opus via /synthesize-url
 voxxy speak --via big-chungus "hi"               # synth remote, play local (SSH via-mode)
 voxxy speak --sink delo-macbook "hi"             # play on the machine listening on that sink
+voxxy speak -v peter --persona auto "deploy ok"  # rewrite in the voice's persona first (off by default; fail-open; or VOX_PERSONA=auto)
 
 # Sinks — audio follows the human, not the process
 voxxy listen --key delo-macbook                  # on the machine you're at: become a sink
@@ -78,6 +90,8 @@ voxxy logs core                                  # docker logs -f vox
 voxxy logs voxcpm                                # docker logs -f voxxy-engine-voxcpm
 voxxy version                                    # CLI + server version
 ```
+
+The persona rewrite calls an OpenAI-compatible endpoint: `VOXXY_PERSONA_BASE_URL` / `persona_base_url` (default `https://api.automaticai.io/v1`), `VOXXY_PERSONA_MODEL` / `persona_model` (default `automaticai/personal/glm-5.3-flash`), key from `VOXXY_PERSONA_API_KEY` or an `op://` reference in `persona_api_key_ref` (`~/.config/voxxy/config.toml`). Details in `cli/README.md`.
 
 All list/info/status/health commands accept `--json` for machine consumption. `scripts/vox-speak` is preserved as a compat shim: it `exec`s into `voxxy speak` with the same flag surface (`--voice`, `--raw`, `--via`, `--url`).
 

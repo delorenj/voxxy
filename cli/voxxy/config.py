@@ -25,6 +25,11 @@ import tomli_w
 
 CONFIG_PATH = Path.home() / ".config" / "voxxy" / "config.toml"
 
+# Module-level because Config is slots=True: `Config.field` is a slot descriptor,
+# not the default value.
+DEFAULT_PERSONA_BASE_URL = "https://api.automaticai.io/v1"
+DEFAULT_PERSONA_MODEL = "automaticai/personal/glm-5.3-flash"
+
 
 class ProjectNotFound(Exception):
     """Raised when no valid voxxy project root can be resolved.
@@ -62,6 +67,12 @@ class Config:
     # Named destination for audio when this shell has no speakers of its own
     # (ssh session, zellij pane, systemd unit). None = always play locally.
     default_sink: Optional[str] = None
+    # `voxxy speak --persona` / `voxxy persona rewrite` call an OpenAI-compatible
+    # chat endpoint directly. The key is never stored raw: persona_api_key_ref is
+    # an op:// reference resolved with `op read` at call time.
+    persona_base_url: str = DEFAULT_PERSONA_BASE_URL
+    persona_model: str = DEFAULT_PERSONA_MODEL
+    persona_api_key_ref: Optional[str] = None
 
 
 def load_config() -> Config:
@@ -85,6 +96,9 @@ def load_config() -> Config:
         default_url=raw.get("default_url", Config.default_url),
         default_voice=raw.get("default_voice", Config.default_voice),
         default_sink=raw.get("default_sink") or None,
+        persona_base_url=raw.get("persona_base_url") or DEFAULT_PERSONA_BASE_URL,
+        persona_model=raw.get("persona_model") or DEFAULT_PERSONA_MODEL,
+        persona_api_key_ref=raw.get("persona_api_key_ref") or None,
     )
 
 
@@ -107,6 +121,12 @@ def save_config(cfg: Config) -> None:
     }
     if cfg.default_sink:
         data["default_sink"] = cfg.default_sink
+    if cfg.persona_base_url != DEFAULT_PERSONA_BASE_URL:
+        data["persona_base_url"] = cfg.persona_base_url
+    if cfg.persona_model != DEFAULT_PERSONA_MODEL:
+        data["persona_model"] = cfg.persona_model
+    if cfg.persona_api_key_ref:
+        data["persona_api_key_ref"] = cfg.persona_api_key_ref
     if cfg.project_root is not None:
         data["project_root"] = str(cfg.project_root)
 

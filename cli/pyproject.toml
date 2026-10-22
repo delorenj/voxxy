@@ -17,6 +17,8 @@ dependencies = [
     # Interactive prompts for `voice add` — falls back to plain input when
     # stdin is not a TTY.
     "questionary>=2",
+    # Persona frontmatter parsing (the voice-persona plugin imports yaml).
+    "pyyaml>=6",
 ]
 
 [project.scripts]

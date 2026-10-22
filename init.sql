@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS voices (
     -- Added for the decoupled engine topology (docs/specs/engine-decoupling.md).
     vibevoice_ref_path    text,
     vibevoice_speaker_tag text,
+    -- voice -> persona association for spoken-text enrichment. NULL = none set (consumers fall
+    -- back to persona frontmatter), 'none' = explicitly no persona, else a persona id.
+    persona               text,
     created_at   timestamptz NOT NULL DEFAULT now(),
     updated_at   timestamptz NOT NULL DEFAULT now()
 );

@@ -1,7 +1,7 @@
 """Voice CRUD commands.
 
-Read-only in Phase 2: `list` and `info`. Mutating (`add`, `delete`)
-arrive in Phase 4.
+`list`, `info`, `add`, `delete`, plus `persona` to associate a Hermes
+voice-persona character with a voice at the voxxy level.
 """
 
 from __future__ import annotations
@@ -27,6 +27,14 @@ from voxxy.audio import (
 )
 from voxxy.client import VoxClient, VoxNotFound, VoxUnreachable, VoxValidationError
 from voxxy.config import load_config
+from voxxy.persona import (
+    NONE_SENTINEL,
+    PERSONA_ID_RE,
+    Effective,
+    effective_persona,
+    persona_id,
+    try_load_plugin,
+)
 
 console = Console()
 
@@ -38,6 +46,7 @@ def register(voice_app: typer.Typer) -> None:
     voice_app.command("info")(voice_info)
     voice_app.command("add")(add)
     voice_app.command("delete")(delete)
+    voice_app.command("persona")(persona)
 
 
 def list_voices(
@@ -65,6 +74,10 @@ def list_voices(
     table.add_column("duration_s", justify="right")
     table.add_column("tags")
     table.add_column("engines")
+    table.add_column("persona")
+    # Frontmatter defaults only matter for voices with no voxxy record; the
+    # plugin is optional here (no project root => just show the records).
+    plugin, _ = try_load_plugin()
     for v in voices:
         engines = []
         if v.vibevoice_ref_path:
@@ -79,6 +92,7 @@ def list_voices(
             f"{v.duration_s:.1f}",
             ",".join(v.tags) if v.tags else "-",
             ",".join(engines),
+            _persona_cell(v.name, v.persona, plugin),
         )
     console.print(table)
 
@@ -98,8 +112,11 @@ def voice_info(
         typer.secho(f"unreachable: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=3)
 
+    plugin, _ = try_load_plugin()
+    eff = effective_persona(v.name, v.persona, plugin)
+
     if as_json:
-        typer.echo(_json.dumps(v.model_dump(), indent=2))
+        typer.echo(_json.dumps({**v.model_dump(), "effective_persona": eff.as_dict()}, indent=2))
         return
 
     body = "\n".join(
@@ -111,9 +128,119 @@ def voice_info(
             f"[bold]elevenlabs[/bold]:   {v.elevenlabs_voice_id or '-'}",
             f"[bold]vibevoice_ref[/bold]: {v.vibevoice_ref_path or '(falls back to wav_path)'}",
             f"[bold]vibevoice_tag[/bold]: {v.vibevoice_speaker_tag or '-'}",
+            f"[bold]persona[/bold]:      {v.persona or '-'}",
+            f"[bold]effective[/bold]:    {eff.label()}",
         ]
     )
     console.print(Panel(body, title=f"voice: {v.name}", border_style="cyan"))
+
+
+def _persona_cell(voice: str, record: str | None, plugin) -> str:
+    """Persona column: the voxxy record, else a dim frontmatter default."""
+    if record:
+        return record
+    eff = effective_persona(voice, None, plugin)
+    if eff.persona_id:
+        return f"[dim]{eff.persona_id} (frontmatter)[/dim]"
+    return "-"
+
+
+def _show_persona(name: str, record: str | None, eff: Effective, as_json: bool) -> None:
+    if as_json:
+        typer.echo(_json.dumps({"voice": name, "persona": record, "effective": eff.as_dict()}, indent=2))
+        return
+    console.print(f"[bold]voice[/bold]:     {name}")
+    console.print(f"[bold]persona[/bold]:   {record or '-'} [dim](voxxy record)[/dim]")
+    console.print(f"[bold]effective[/bold]: {eff.label()}")
+    if eff.problem:
+        console.print(f"[yellow]warning: {eff.problem}[/yellow]")
+    if eff.source == "unknown":
+        console.print("[dim]frontmatter default not checked (voxxy project root not found)[/dim]")
+
+
+def persona(
+    name: str = typer.Argument(..., metavar="VOICE", help="Voice slug."),
+    persona_arg: str | None = typer.Argument(
+        None, metavar="[PERSONA]",
+        help="Persona id to associate, or 'none' for explicitly no persona. Omit to show.",
+    ),
+    clear: bool = typer.Option(False, "--clear", help="Remove the voxxy-level association (back to frontmatter defaults)."),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Dump JSON."),
+) -> None:
+    """Show or set which persona a voice speaks as.
+
+    The association is stored on the voxxy server, so it follows the voice to
+    every consumer (Hermes TTS enrichment, `voxxy speak --persona auto`).
+    With no voxxy-level record, consumers fall back to the persona file's own
+    `voices:` frontmatter; 'none' suppresses that fallback.
+
+    Examples:
+
+      voxxy voice persona peter                  # show current + effective
+      voxxy voice persona peter peter-griffin    # associate
+      voxxy voice persona peter none             # explicitly no persona
+      voxxy voice persona peter --clear          # back to frontmatter default
+    """
+    if clear and persona_arg is not None:
+        typer.secho("pass either PERSONA or --clear, not both", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    cfg = load_config()
+    client = VoxClient(cfg.default_url)
+    plugin, plugin_err = try_load_plugin()
+
+    if persona_arg is None and not clear:
+        try:
+            v = client.get_voice(name)
+        except VoxNotFound:
+            typer.secho(f"voice '{name}' not found", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=4)
+        except VoxUnreachable as exc:
+            typer.secho(f"unreachable: {exc}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=3)
+        _show_persona(name, v.persona, effective_persona(name, v.persona, plugin), as_json)
+        return
+
+    new_value: str | None = None
+    if persona_arg is not None:
+        new_value = persona_arg.strip()
+        if new_value.lower() == NONE_SENTINEL:
+            new_value = NONE_SENTINEL
+        elif not PERSONA_ID_RE.match(new_value):
+            typer.secho(
+                f"invalid persona id '{persona_arg}': must match {PERSONA_ID_RE.pattern}",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=5)
+        elif plugin is None:
+            typer.secho(
+                f"warning: cannot check '{new_value}' against bundled personas ({plugin_err}); setting anyway",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        else:
+            known = [persona_id(p) for p in plugin.list_personas()]
+            if new_value not in known:
+                typer.secho(
+                    f"warning: no bundled persona '{new_value}' (available: {', '.join(known) or '-'}); setting anyway",
+                    fg=typer.colors.YELLOW, err=True,
+                )
+
+    try:
+        v = client.set_voice_persona(name, new_value)
+    except VoxNotFound:
+        typer.secho(
+            f"voice '{name}' not found (or the server predates persona support)",
+            fg=typer.colors.RED, err=True,
+        )
+        raise typer.Exit(code=4)
+    except VoxUnreachable as exc:
+        typer.secho(f"unreachable: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=3)
+    except VoxValidationError as exc:
+        typer.secho(f"server rejected persona: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=5)
+
+    _show_persona(name, v.persona, effective_persona(name, v.persona, plugin), as_json)
 
 
 def add(

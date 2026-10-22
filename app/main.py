@@ -44,7 +44,7 @@ from app.auth import ApiKeyAuthMiddleware
 from app import cache as audio_cache
 from app import sink as sink_relay
 from app.engines import ElevenLabsEngine, EngineOrchestrator, PermanentEngineError, RemoteEngineClient, SynthResult
-from app.voices import VOICES_DIR, Voice, VoiceRepo
+from app.voices import PERSONA_NONE, PERSONA_RE, VOICES_DIR, Voice, VoiceRepo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -155,6 +155,7 @@ class VoiceOut(BaseModel):
     elevenlabs_voice_id: Optional[str] = None
     vibevoice_ref_path: Optional[str] = None
     vibevoice_speaker_tag: Optional[str] = None
+    persona: Optional[str] = None
 
     @classmethod
     def from_model(cls, v: Voice) -> "VoiceOut":
@@ -167,7 +168,13 @@ class VoiceOut(BaseModel):
             elevenlabs_voice_id=v.elevenlabs_voice_id,
             vibevoice_ref_path=v.vibevoice_ref_path,
             vibevoice_speaker_tag=v.vibevoice_speaker_tag,
+            persona=v.persona,
         )
+
+
+class VoicePersonaIn(BaseModel):
+    # A persona slug, "none" (explicitly no persona) or null (clear the association).
+    persona: Optional[str] = None
 
 
 # ---------- synthesis helpers ----------
@@ -599,6 +606,24 @@ async def create_voice(
     return VoiceOut.from_model(v)
 
 
+@app.put("/voices/{name}/persona", response_model=VoiceOut)
+async def set_voice_persona(name: str, body: VoicePersonaIn) -> VoiceOut:
+    """Associate a spoken-text persona with a voice.
+
+    ``persona`` is a persona id (basename of plugins/voice-persona/personas/<id>.md), ``"none"``
+    to suppress persona enrichment for this voice, or ``null`` to clear the association. The
+    server stores the slug only; it does not read persona files.
+    """
+    assert _repo is not None
+    persona = body.persona.strip() if body.persona is not None else None
+    if persona is not None and persona != PERSONA_NONE and not PERSONA_RE.match(persona):
+        raise HTTPException(422, f"invalid persona {body.persona!r}: expected [A-Za-z0-9][A-Za-z0-9_.-]* or 'none'")
+    v = await _repo.set_persona(name, persona)
+    if v is None:
+        raise HTTPException(404, f"voice '{name}' not found")
+    return VoiceOut.from_model(v)
+
+
 @app.delete("/voices/{name}")
 async def delete_voice(name: str):
     assert _repo is not None
@@ -746,6 +771,7 @@ async def list_voices_tool() -> list[dict]:
             "duration_s": v.duration_s,
             "tags": v.tags,
             "elevenlabs_voice_id": v.elevenlabs_voice_id,
+            "persona": v.persona,
         }
         for v in await _repo.list()
     ]

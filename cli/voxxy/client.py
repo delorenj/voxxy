@@ -90,6 +90,10 @@ class VoiceOut(BaseModel):
     elevenlabs_voice_id: Optional[str] = None
     vibevoice_ref_path: Optional[str] = None
     vibevoice_speaker_tag: Optional[str] = None
+    # Voxxy-level persona association. None = unset (consumers fall back to
+    # persona frontmatter ``voices:``), "none" = explicitly no persona, else a
+    # persona id. Older servers omit the field entirely; None covers that too.
+    persona: Optional[str] = None
 
 
 class SinkStatusResponse(BaseModel):
@@ -251,6 +255,16 @@ class VoxClient:
             files = {"audio": (audio_path.name, fh, "audio/wav")}
             resp = self._request("POST", "/voices", data=form_data, files=files)
 
+        return VoiceOut.model_validate(resp.json())
+
+    def set_voice_persona(self, name: str, persona: Optional[str]) -> VoiceOut:
+        """PUT /voices/{name}/persona — associate a persona with a voice.
+
+        ``persona`` is a persona id, ``"none"`` (explicitly no persona) or None
+        (clear the association). Raises VoxNotFound for an unknown voice and
+        VoxValidationError for a malformed slug (422).
+        """
+        resp = self._request("PUT", f"/voices/{name}/persona", json={"persona": persona})
         return VoiceOut.model_validate(resp.json())
 
     def delete_voice(self, name: str) -> None:

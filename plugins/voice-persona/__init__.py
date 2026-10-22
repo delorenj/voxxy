@@ -7,7 +7,12 @@ Dr. Steve Brule, ...) without losing a single fact. The pass is side-effect
 free, fail-open (any problem returns ``None`` and the original text is spoken),
 grounded (numbers must survive) and versioned (``PROMPT_VERSION``).
 
-Hermes internals are imported lazily so this module imports cleanly in tests.
+Which persona speaks for a voice is resolved as: profile ``file`` > profile ``name`` > the voxxy
+voice record's ``persona`` (``GET /voices/<voice>``; ``none`` means "no persona") > persona
+frontmatter ``voices:``. See README.md.
+
+Hermes internals are imported lazily so this module imports cleanly outside Hermes; the voxxy CLI
+loads this file by path and uses the public API listed in ``__all__``.
 """
 
 from __future__ import annotations
@@ -16,16 +21,34 @@ import contextvars
 import logging
 import os
 import re
+import json
 import threading
+import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import quote
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "PROMPT_VERSION", "PERSONAS_DIR", "PERSONA_NONE", "Persona", "PersonaConfig",
+    "load_persona", "list_personas", "persona_by_id", "frontmatter_persona_for_voice", "resolve_persona",
+    "build_messages", "sanitize_output", "validate_rewrite", "rewrite_with", "rewrite_text",
+    "transform_tts_text", "register",
+]
 
 PROMPT_VERSION = "voice-persona/3"
 AUX_TASK = "tts_persona"
 PERSONAS_DIR = Path(__file__).resolve().parent / "personas"
+# voices.persona value meaning "this voice explicitly has no persona" (no frontmatter fallback either).
+PERSONA_NONE = "none"
+NO_RESPONSE = "no response from the model"
+
+DEFAULT_VOX_URL = "https://vox.delo.sh"
+DEFAULT_VOXXY_TIMEOUT_SECONDS = 3.0
+VOXXY_CACHE_TTL_SECONDS = 60.0
 
 # Below core's tts.transform_timeout_seconds (45) so the plugin gives up first; the default aux route
 # (provider auto) is a reasoning model that needs ~18-24s for a handful of sentences.
@@ -92,6 +115,11 @@ class Persona:
     description: str = ""
     path: Optional[Path] = None
 
+    @property
+    def id(self) -> str:
+        """Persona id: the basename of its file (``peter-griffin``), as stored in ``voices.persona``."""
+        return self.path.stem if self.path is not None else self.name
+
 
 @dataclass
 class PersonaConfig:
@@ -102,11 +130,14 @@ class PersonaConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_ratio: float = DEFAULT_MAX_RATIO
     min_ratio: float = DEFAULT_MIN_RATIO
+    voxxy_timeout_seconds: float = DEFAULT_VOXXY_TIMEOUT_SECONDS
 
 
 # (resolved path, mtime_ns) -> Persona. In-memory only; nothing is cached to disk.
 _PERSONA_CACHE: Dict[Tuple[str, int], Persona] = {}
 _LOGGED_ONCE: set = set()
+# (base_url, voice) -> (expires_at monotonic, persona slug or None). Negative and failed lookups are cached too.
+_VOXXY_CACHE: Dict[Tuple[str, str], Tuple[float, Optional[str]]] = {}
 
 
 def _log_once(key: str, message: str, *args: Any) -> None:
@@ -173,6 +204,8 @@ def _persona_config(config: Optional[Dict[str, Any]] = None) -> PersonaConfig:
         timeout_seconds=_number(section.get("timeout_seconds"), DEFAULT_TIMEOUT_SECONDS, low=1.0, high=120.0),
         max_ratio=_number(section.get("max_ratio"), DEFAULT_MAX_RATIO, low=1.0, high=10.0),
         min_ratio=_number(section.get("min_ratio"), DEFAULT_MIN_RATIO, low=0.0, high=1.0),
+        voxxy_timeout_seconds=_number(section.get("voxxy_timeout_seconds"), DEFAULT_VOXXY_TIMEOUT_SECONDS,
+                                      low=0.5, high=15.0),
     )
 
 
@@ -252,8 +285,94 @@ def _normalize_voice(voice: Any) -> str:
     return Path(text).stem if text else ""
 
 
-def resolve_persona(cfg: PersonaConfig, voice: Optional[str]) -> Optional[Persona]:
-    """file > name > auto_from_voice. A missing persona is a no-op (logged once)."""
+def list_personas() -> List[Persona]:
+    """Every bundled persona that parses, sorted by file name."""
+    return [p for p in (load_persona(path) for path in _bundled_paths()) if p is not None]
+
+
+def persona_by_id(slug: Any) -> Optional[Persona]:
+    """Bundled persona for ``personas/<slug>.md``; None for a bad slug or a missing/empty file."""
+    slug = str(slug or "").strip()
+    if not _NAME_RE.match(slug):
+        return None
+    return load_persona(PERSONAS_DIR / f"{slug}.md")
+
+
+def frontmatter_persona_for_voice(voice: Any) -> Optional[Persona]:
+    """Bundled persona whose frontmatter ``voices:`` lists this voice (case-insensitive)."""
+    wanted = _normalize_voice(voice)
+    if not wanted:
+        return None
+    for persona in list_personas():
+        if wanted in persona.voices:
+            return persona
+    return None
+
+
+def _vox_settings() -> Tuple[str, Optional[str]]:
+    """(base_url, api_key) exactly as the ``vox`` TTS provider resolves them: tts.vox config, then env."""
+    tts = _load_config().get("tts")
+    # ``voxxy`` is the provider's legacy alias for the same block.
+    section = (tts.get("vox") or tts.get("voxxy")) if isinstance(tts, dict) else None
+    section = section if isinstance(section, dict) else {}
+    base = str(section.get("base_url") or os.environ.get("VOX_URL") or DEFAULT_VOX_URL).strip().rstrip("/")
+    key = str(section.get("api_key") or os.environ.get("VOX_API_KEY") or "").strip()
+    return base or DEFAULT_VOX_URL, key or None
+
+
+def _fetch_voice_record(base: str, voice: str, api_key: Optional[str], timeout: float) -> Dict[str, Any]:
+    """GET {base}/voices/{voice} -> parsed JSON. Raises on any failure; the caller turns that into a fallback."""
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+        headers["X-API-Key"] = api_key
+    request = urllib.request.Request(f"{base}/voices/{quote(voice, safe='')}", headers=headers)
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - operator-configured vox URL
+        record = json.loads(response.read().decode("utf-8"))
+    if not isinstance(record, dict):
+        raise ValueError("voice record is not a JSON object")
+    return record
+
+
+def voxxy_persona_for_voice(voice: Any, timeout: float = DEFAULT_VOXXY_TIMEOUT_SECONDS) -> Optional[str]:
+    """The voxxy voice record's ``persona`` (a slug or ``"none"``); None when unset or on any failure.
+
+    Cached in memory for ``VOXXY_CACHE_TTL_SECONDS`` per (base, voice), failures included, so a down
+    voxxy costs one short timeout a minute rather than one per utterance. Never raises.
+    """
+    name = str(voice or "").strip()
+    if not name:
+        return None
+    try:
+        base, api_key = _vox_settings()
+        key = (base, name)
+        cached = _VOXXY_CACHE.get(key)
+        now = time.monotonic()
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        persona: Optional[str] = None
+        try:
+            value = _fetch_voice_record(base, name, api_key, timeout).get("persona")
+            if isinstance(value, str) and (value == PERSONA_NONE or _NAME_RE.match(value)):
+                persona = value
+            elif value is not None:
+                _log_once(("voxxy-bad", base, name), "voice-persona: voxxy voice %r has an unusable persona %r; "
+                          "falling back to persona frontmatter", name, value)
+        except Exception as exc:  # noqa: BLE001 - network, 404, bad JSON: all mean "no voxxy association"
+            _log_once(("voxxy", base, name), "voice-persona: voxxy lookup for voice %r at %s failed (%s); "
+                      "falling back to persona frontmatter", name, base, exc)
+        _VOXXY_CACHE[key] = (now + VOXXY_CACHE_TTL_SECONDS, persona)
+        return persona
+    except Exception as exc:  # noqa: BLE001 - config trouble must not break speech either
+        logger.debug("voice-persona: voxxy lookup skipped (%s)", exc)
+        return None
+
+
+def resolve_persona(cfg: PersonaConfig, voice: Optional[str], provider: Optional[str] = None) -> Optional[Persona]:
+    """file > name > voxxy voice record > frontmatter ``voices:``. A missing persona is a no-op (logged once).
+
+    The voxxy lookup runs only with ``auto_from_voice`` on, a voice set, and a ``vox`` (or unspecified) provider.
+    """
     if cfg.file:
         path = Path(os.path.expandvars(cfg.file)).expanduser()
         if not path.is_absolute():
@@ -266,18 +385,24 @@ def resolve_persona(cfg: PersonaConfig, voice: Optional[str]) -> Optional[Person
         if not _NAME_RE.match(cfg.name):
             _log_once(f"name:{cfg.name}", "voice-persona: invalid persona name %r", cfg.name)
             return None
-        persona = load_persona(PERSONAS_DIR / f"{cfg.name}.md")
+        persona = persona_by_id(cfg.name)
         if persona is None:
             _log_once(f"name:{cfg.name}", "voice-persona: no bundled persona %r; speaking original text", cfg.name)
         return persona
     if cfg.auto_from_voice:
-        wanted = _normalize_voice(voice)
-        if not wanted:
+        if not _normalize_voice(voice):
             return None
-        for path in _bundled_paths():
-            persona = load_persona(path)
-            if persona is not None and wanted in persona.voices:
+        if (provider or "").strip().lower() in ("", "vox"):
+            slug = voxxy_persona_for_voice(voice, cfg.voxxy_timeout_seconds)
+            if slug == PERSONA_NONE:
+                return None
+            if slug:
+                persona = persona_by_id(slug)
+                if persona is None:
+                    _log_once(f"voxxy-persona:{slug}", "voice-persona: voxxy maps voice %r to persona %r but "
+                              "personas/%s.md is missing or empty; speaking original text", voice, slug, slug)
                 return persona
+        return frontmatter_persona_for_voice(voice)
     return None
 
 
@@ -396,21 +521,38 @@ def validate_rewrite(source: str, rewrite: str, cfg: PersonaConfig) -> Optional[
 
 # --------------------------------------------------------------------------- hook
 
-def rewrite_text(text: str, persona: Persona, cfg: PersonaConfig) -> Optional[str]:
-    """One persona rewrite; returns the validated replacement or None."""
+LLMCaller = Callable[..., Optional[str]]
+
+
+def rewrite_with(text: str, persona: Persona, cfg: PersonaConfig, call: LLMCaller) -> Tuple[Optional[str], Optional[str]]:
+    """The one rewrite + validate path: ``(replacement, None)`` when accepted, ``(None, reason)`` otherwise.
+
+    ``call(messages, timeout=..., temperature=...) -> str`` is the injected LLM caller (Hermes' auxiliary
+    client in the plugin, an OpenAI-compatible HTTP call in the voxxy CLI). It may raise or return nothing.
+    """
     temperature = persona.temperature if persona.temperature is not None else DEFAULT_TEMPERATURE
-    logger.debug("voice-persona: rewriting %d chars as %s (prompt %s)", len(text), persona.name, PROMPT_VERSION)
-    raw = _call_with_deadline(build_messages(persona, text, cfg.max_ratio), timeout=cfg.timeout_seconds, temperature=temperature)
+    try:
+        raw = call(build_messages(persona, text, cfg.max_ratio), timeout=cfg.timeout_seconds, temperature=temperature)
+    except Exception as exc:  # noqa: BLE001 - reported as a reason, never re-raised
+        return None, f"llm call failed: {exc}"
     if not raw:
-        return None
+        return None, NO_RESPONSE
     cleaned = sanitize_output(raw)
     reason = validate_rewrite(text, cleaned, cfg)
+    return (None, reason) if reason else (cleaned, None)
+
+
+def rewrite_text(text: str, persona: Persona, cfg: PersonaConfig) -> Optional[str]:
+    """One persona rewrite through Hermes' auxiliary LLM; returns the validated replacement or None."""
+    logger.debug("voice-persona: rewriting %d chars as %s (prompt %s)", len(text), persona.name, PROMPT_VERSION)
+    cleaned, reason = rewrite_with(text, persona, cfg, _call_with_deadline)
     if reason:
-        logger.warning("voice-persona: rejected %s rewrite (%s, prompt %s); speaking original text",
-                       persona.name, reason, PROMPT_VERSION)
+        if reason != NO_RESPONSE:  # a timeout/error was already logged by _call_with_deadline
+            logger.warning("voice-persona: rejected %s rewrite (%s, prompt %s); speaking original text",
+                           persona.name, reason, PROMPT_VERSION)
         return None
     logger.info("voice-persona: %s rewrite accepted (%d -> %d chars, prompt %s)",
-                persona.name, len(text), len(cleaned), PROMPT_VERSION)
+                persona.name, len(text), len(cleaned or ""), PROMPT_VERSION)
     return cleaned
 
 
@@ -423,7 +565,7 @@ def transform_tts_text(text: Any = None, provider: Optional[str] = None, voice: 
         cfg = _persona_config()
         if not cfg.enabled:
             return None
-        persona = resolve_persona(cfg, voice)
+        persona = resolve_persona(cfg, voice, provider)
         if persona is None:
             return None
         return rewrite_text(text, persona, cfg)

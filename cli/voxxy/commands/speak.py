@@ -26,6 +26,12 @@ piped on stdin. This preserves the remote-synth + local-play pattern from
 the bash original. The remote side can be any shim that accepts
 ``--raw``, so old ``vox-speak`` installs on remote hosts still work.
 
+``--persona ID|auto`` (or ``$VOX_PERSONA``) rewrites the text in a character's
+voice before synthesis, via the voice-persona plugin. Off by default: speak is
+used by scripts and must never gain LLM latency silently. It is fail-open: any
+rewrite problem speaks the original text and warns on stderr. The rewrite
+happens locally before any mode (play/raw/out/sink/via) takes over.
+
 If ``VOX_API_KEY`` is set, the underlying HTTP client automatically sends both
 Bearer and ``X-API-Key`` headers so secured Voxxy deployments keep working
 without extra speak-specific flags.
@@ -43,6 +49,7 @@ from typing import Optional
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 
 from voxxy.client import (
     VoxClient,
@@ -117,6 +124,11 @@ def speak(
         False, "--no-sink",
         help="Ignore any configured sink and play on this machine's speakers.",
     ),
+    persona: Optional[str] = typer.Option(
+        None, "--persona", envvar="VOX_PERSONA",
+        help="Rewrite the text in a character's voice first: a persona ID, or 'auto' for "
+             "the voice's own persona. Off by default (adds an LLM call); fail-open.",
+    ),
     cfg_value: float = typer.Option(2.0, "-c", "--cfg", min=1.0, max=5.0),
     steps: int = typer.Option(10, "-S", "--steps", min=1, max=50),
 ) -> None:
@@ -131,6 +143,7 @@ def speak(
       voxxy speak --via big-chungus "hi"
       voxxy speak --out /tmp/voice.ogg "hi"
       voxxy speak --sink delo-macbook "hi"   # play on the machine at my desk
+      voxxy speak -v peter --persona auto "deploy done"   # in Peter's words
     """
     # Resolve configuration with env overrides (env wins over config, flags win
     # over env). Matches the bash original's precedence.
@@ -183,6 +196,11 @@ def speak(
         via_host = None
 
     client = VoxClient(base_url)
+
+    # Opt-in persona rewrite. Runs before every mode so sink/via/out all speak
+    # the in-character text; --via pipes the rewritten text to the remote.
+    if persona and persona.strip().lower() not in _PERSONA_OFF:
+        text_str = _persona_rewrite(client, text_str, voice_name, persona.strip())
 
     # A live sink outranks --via / $VOX_REMOTE_HOST: the sink is where the human
     # is listening, and it only needs the public URL, whereas --via needs an ssh
@@ -276,6 +294,57 @@ def _via_is_local(host: str) -> bool:
         except OSError:
             continue
     return False
+
+
+_PERSONA_OFF = {"", "off", "none", "false", "0", "no"}
+
+
+def _persona_rewrite(client: VoxClient, text: str, voice: str | None, spec: str) -> str:
+    """Return the in-character text, or the original on ANY failure (with a warning).
+
+    ``spec`` is a persona id or ``auto`` (the voice's effective persona: voxxy
+    record, else persona-file frontmatter). Imported lazily so plain `speak`
+    never pays for the plugin, yaml, or the LLM client.
+    """
+    def warn(msg: str) -> str:
+        console.print(f"[dim]persona: {escape(msg)}; speaking original text[/dim]")
+        return text
+
+    try:
+        from voxxy.persona import (
+            PersonaLLM, effective_persona, load_plugin, persona_by_id, persona_id, rewrite,
+        )
+
+        plugin = load_plugin()
+        if spec.lower() == "auto":
+            record = None
+            try:
+                record = client.get_voice(voice).persona if voice else None
+            except VoxError as exc:
+                # Frontmatter mapping still works without the voxxy record.
+                console.print(f"[dim]persona: voxxy voice record unavailable ({exc})[/dim]")
+            eff = effective_persona(voice or "", record, plugin)
+            if eff.persona is None:
+                why = eff.problem or ("explicitly none" if eff.explicit_none else "no persona for this voice")
+                return warn(why)
+            chosen = eff.persona
+        else:
+            chosen = persona_by_id(plugin, spec)
+            if chosen is None:
+                return warn(f"no bundled persona '{spec}'")
+
+        result = rewrite(plugin, chosen, text, PersonaLLM())
+        if not result.accepted:
+            return warn(f"{persona_id(chosen)} rewrite rejected ({result.reason})")
+        if sys.stderr.isatty():
+            console.print(
+                f"[dim]persona: {persona_id(chosen)} ({len(text)} -> {len(result.rewrite)} chars, "
+                f"{result.elapsed_s:.1f}s)[/dim]"
+            )
+        return result.rewrite
+    except Exception as exc:  # noqa: BLE001 - speak must never fail because of a persona
+        first = (str(exc).splitlines() or [type(exc).__name__])[0]
+        return warn(first or type(exc).__name__)
 
 
 def _fetch_wav(

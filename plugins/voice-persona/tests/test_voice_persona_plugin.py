@@ -38,6 +38,21 @@ def vp(monkeypatch, tmp_path):
     monkeypatch.setattr(module, "_load_config", lambda: state)
     monkeypatch.setattr(module, "_hermes_home", lambda: tmp_path)
     monkeypatch.setattr(module, "_call_llm_text", fake_llm)
+    # Never touch the network: by default the voxxy voice record has no persona (frontmatter fallback).
+    voxxy: dict = {"record": {}, "calls": []}
+
+    def fake_fetch(base, voice, api_key, timeout):
+        voxxy["calls"].append({"base": base, "voice": voice, "api_key": api_key, "timeout": timeout})
+        record = voxxy["record"]
+        if isinstance(record, Exception):
+            raise record
+        return record
+
+    monkeypatch.setattr(module, "_fetch_voice_record", fake_fetch)
+    monkeypatch.delenv("VOX_URL", raising=False)
+    monkeypatch.delenv("VOX_API_KEY", raising=False)
+    module._VOXXY_CACHE.clear()
+    module.voxxy = voxxy
     module.state = state
     module.calls = calls
     return module
@@ -292,3 +307,237 @@ def test_unparseable_frontmatter_is_logged_once(vp, caplog) -> None:
         vp._split_frontmatter(raw)
     assert meta == {} and body.strip() == "Body text."
     assert sum("frontmatter did not parse" in r.message for r in caplog.records) == 1
+
+
+# --------------------------------------------------------------------------- voxxy-level association
+
+def _voxxy(vp, persona, **extra):
+    vp.voxxy["record"] = {"name": "x", "persona": persona, **extra}
+
+
+def test_voxxy_record_beats_frontmatter(vp) -> None:
+    _cfg(vp)
+    _voxxy(vp, "george-carlin")
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "George Carlin"
+    assert vp.voxxy["calls"][0]["voice"] == "peter"
+
+
+def test_voxxy_lookup_gating(vp) -> None:
+    _voxxy(vp, "george-carlin")
+    # provider None/empty/vox -> lookup; another provider, no voice or auto_from_voice off -> no lookup
+    _cfg(vp)
+    for provider in (None, "", "VOX"):
+        assert vp.resolve_persona(vp._persona_config(), "peter", provider).name == "George Carlin"
+    vp._VOXXY_CACHE.clear()
+    vp.voxxy["calls"].clear()
+    assert vp.resolve_persona(vp._persona_config(), "peter", "elevenlabs").name == "Peter Griffin"
+    assert vp.resolve_persona(vp._persona_config(), None, "vox") is None
+    _cfg(vp, auto_from_voice=False)
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox") is None
+    assert vp.voxxy["calls"] == []
+
+
+def test_file_and_name_beat_voxxy(vp, tmp_path) -> None:
+    _voxxy(vp, "george-carlin")
+    custom = tmp_path / "PERSONA.md"
+    custom.write_text("---\nname: Custom Guy\n---\nTalks like a pirate.\n")
+    _cfg(vp, file=str(custom), name="steve-brule")
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "Custom Guy"
+    _cfg(vp, name="steve-brule")
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "Dr. Steve Brule"
+    assert vp.voxxy["calls"] == []
+
+
+def test_voxxy_none_suppresses_frontmatter_fallback(vp) -> None:
+    _cfg(vp)
+    _voxxy(vp, "none")
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox") is None
+    assert vp.transform_tts_text(text=SOURCE, provider="vox", voice="peter") is None
+    assert vp.calls == []
+
+
+def test_voxxy_null_persona_falls_back_to_frontmatter(vp) -> None:
+    _cfg(vp)
+    _voxxy(vp, None)
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "Peter Griffin"
+
+
+def test_voxxy_missing_persona_file_is_noop_not_fallback(vp, caplog) -> None:
+    import logging
+    _cfg(vp)
+    _voxxy(vp, "ghost-persona")
+    with caplog.at_level(logging.WARNING):
+        assert vp.resolve_persona(vp._persona_config(), "peter", "vox") is None
+        assert vp.resolve_persona(vp._persona_config(), "peter", "vox") is None
+    assert sum("ghost-persona" in r.message for r in caplog.records) == 1
+
+
+@pytest.mark.parametrize("failure", [OSError("connection refused"), ValueError("bad json"), TimeoutError("slow")])
+def test_voxxy_failure_falls_back_and_logs_once(vp, caplog, failure) -> None:
+    import logging
+    _cfg(vp)
+    vp.voxxy["record"] = failure
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            vp._VOXXY_CACHE.clear()
+            assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "Peter Griffin"
+    assert sum("voxxy lookup" in r.message for r in caplog.records) == 1
+
+
+def test_voxxy_unusable_slug_falls_back(vp) -> None:
+    _cfg(vp)
+    for bad in ("../etc/passwd", 7, ["x"]):
+        vp._VOXXY_CACHE.clear()
+        _voxxy(vp, bad)
+        assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "Peter Griffin"
+
+
+def test_voxxy_cache_ttl_includes_negative_results(vp, monkeypatch) -> None:
+    _cfg(vp)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(vp.time, "monotonic", lambda: clock["now"])
+    vp.voxxy["record"] = OSError("down")
+    for _ in range(3):
+        vp.resolve_persona(vp._persona_config(), "peter", "vox")
+    assert len(vp.voxxy["calls"]) == 1  # the failure itself is cached
+    clock["now"] += vp.VOXXY_CACHE_TTL_SECONDS + 1
+    _voxxy(vp, "george-carlin")
+    assert vp.resolve_persona(vp._persona_config(), "peter", "vox").name == "George Carlin"
+    assert len(vp.voxxy["calls"]) == 2
+    vp.resolve_persona(vp._persona_config(), "peter", "vox")
+    assert len(vp.voxxy["calls"]) == 2
+    vp.resolve_persona(vp._persona_config(), "rick", "vox")  # keyed per voice
+    assert len(vp.voxxy["calls"]) == 3
+
+
+def test_vox_settings_resolution(vp, monkeypatch) -> None:
+    assert vp._vox_settings() == ("https://vox.delo.sh", None)
+    monkeypatch.setenv("VOX_URL", "http://127.0.0.1:9999/")
+    monkeypatch.setenv("VOX_API_KEY", "env-key")
+    assert vp._vox_settings() == ("http://127.0.0.1:9999", "env-key")
+    vp.state["tts"]["vox"] = {"base_url": "http://cfg.example/", "api_key": "cfg-key"}
+    assert vp._vox_settings() == ("http://cfg.example", "cfg-key")
+
+
+def test_voxxy_timeout_config_clamped(vp) -> None:
+    assert vp._persona_config({}).voxxy_timeout_seconds == 3.0
+    for raw, want in ((0.01, 0.5), (99, 15.0), ("1.5", 1.5), ("junk", 3.0)):
+        cfg = vp._persona_config({"tts": {"persona": {"voxxy_timeout_seconds": raw}}})
+        assert cfg.voxxy_timeout_seconds == want
+    _cfg(vp, voxxy_timeout_seconds=7)
+    vp.resolve_persona(vp._persona_config(), "peter", "vox")
+    assert vp.voxxy["calls"][0]["timeout"] == 7
+
+
+def test_hook_uses_voxxy_persona_end_to_end(vp) -> None:
+    _cfg(vp)
+    _voxxy(vp, "steve-brule")
+    assert vp.transform_tts_text(text=SOURCE, provider="vox", voice="peter")
+    assert "Steve Brule" in vp.calls[0]["messages"][0]["content"]
+
+
+def test_real_http_lookup_against_local_server(vp, monkeypatch) -> None:
+    """The unstubbed urllib path: URL shape, auth headers, 404 and non-JSON bodies."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    seen: list = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen.append((self.path, self.headers.get("Authorization"), self.headers.get("X-API-Key")))
+            if self.path == "/voices/peter":
+                body, code = json.dumps({"name": "peter", "persona": "george-carlin"}).encode(), 200
+            elif self.path == "/voices/junk":
+                body, code = b"<html>", 200
+            else:
+                body, code = b'{"detail": "nope"}', 404
+            self.send_response(code)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        monkeypatch.setenv("VOX_URL", base)
+        monkeypatch.setenv("VOX_API_KEY", "k3y")
+        monkeypatch.setattr(vp, "_fetch_voice_record", _load_plugin_module()._fetch_voice_record)  # un-stub
+        assert vp.voxxy_persona_for_voice("peter") == "george-carlin"
+        assert seen[0] == ("/voices/peter", "Bearer k3y", "k3y")
+        assert vp.voxxy_persona_for_voice("ghost") is None  # 404
+        assert vp.voxxy_persona_for_voice("junk") is None  # not JSON
+    finally:
+        server.shutdown()
+
+
+# --------------------------------------------------------------------------- public API for the CLI
+
+def test_public_api_surface() -> None:
+    vp = _load_plugin_module()
+    for name in vp.__all__:
+        assert hasattr(vp, name), name
+    for name in ("list_personas", "persona_by_id", "frontmatter_persona_for_voice", "rewrite_with",
+                 "load_persona", "build_messages", "sanitize_output", "validate_rewrite", "PersonaConfig",
+                 "PERSONAS_DIR", "PROMPT_VERSION"):
+        assert name in vp.__all__, name
+
+
+def test_list_personas_and_persona_by_id() -> None:
+    vp = _load_plugin_module()
+    assert [p.id for p in vp.list_personas()] == ["george-carlin", "peter-griffin", "steve-brule"]
+    assert vp.persona_by_id("peter-griffin").name == "Peter Griffin"
+    for bad in ("nope", "../x", "", None, "-x"):
+        assert vp.persona_by_id(bad) is None
+
+
+def test_frontmatter_persona_for_voice() -> None:
+    vp = _load_plugin_module()
+    assert vp.frontmatter_persona_for_voice("Peter").id == "peter-griffin"
+    assert vp.frontmatter_persona_for_voice("peter.wav").id == "peter-griffin"
+    assert vp.frontmatter_persona_for_voice("rick") is None
+    assert vp.frontmatter_persona_for_voice(None) is None
+
+
+def test_rewrite_with_injected_caller(vp) -> None:
+    persona = vp.persona_by_id("peter-griffin")
+    cfg = vp.PersonaConfig(timeout_seconds=9)
+    got = {}
+    good = "Freakin' sweet, the build finished in 42 seconds and all 118 tests passed. I pushed the changes to main."
+
+    def call(messages, *, timeout, temperature):
+        got.update(messages=messages, timeout=timeout, temperature=temperature)
+        return f'"{good}"'
+
+    assert vp.rewrite_with(SOURCE, persona, cfg, call) == (good, None)
+    assert got["timeout"] == 9 and got["temperature"] == 0.8 and SOURCE in got["messages"][1]["content"]
+
+    replacement, reason = vp.rewrite_with(SOURCE, persona, cfg, lambda m, **k: "42 118 ok")
+    assert replacement is None and reason.startswith("too short")
+    replacement, reason = vp.rewrite_with(SOURCE, persona, cfg, lambda m, **k: "Holy crap. " * 60)
+    assert replacement is None and reason.startswith("too long")
+    replacement, reason = vp.rewrite_with(SOURCE, persona, cfg, lambda m, **k: None)
+    assert replacement is None and reason == vp.NO_RESPONSE
+
+    def boom(messages, **kw):
+        raise RuntimeError("gateway down")
+
+    replacement, reason = vp.rewrite_with(SOURCE, persona, cfg, boom)
+    assert replacement is None and "gateway down" in reason
+
+
+def test_rewrite_text_goes_through_rewrite_with(vp, monkeypatch) -> None:
+    seen = {}
+
+    def fake(text, persona, cfg, call):
+        seen.update(text=text, persona=persona.name, call=call)
+        return "ok", None
+
+    monkeypatch.setattr(vp, "rewrite_with", fake)
+    assert vp.rewrite_text(SOURCE, vp.persona_by_id("peter-griffin"), vp.PersonaConfig()) == "ok"
+    assert seen["call"] is vp._call_with_deadline

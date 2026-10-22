@@ -1,6 +1,6 @@
 """Top-level Typer app wiring.
 
-Subcommand groups (`daemon`, `engine`, `voice`) are mounted as sub-apps.
+Subcommand groups (`daemon`, `engine`, `voice`, `persona`) are mounted as sub-apps.
 Leaf commands live under :mod:`voxxy.commands` and register themselves
 onto either the root or the right sub-app via a ``register`` entrypoint.
 Kept thin here so cold-start cost stays low for shell completions.
@@ -15,6 +15,7 @@ import typer
 from voxxy.commands import daemon as daemon_commands
 from voxxy.commands import engine as engine_commands
 from voxxy.commands import listen as listen_commands
+from voxxy.commands import persona as persona_commands
 from voxxy.commands import speak as speak_commands
 from voxxy.commands import util as util_commands
 from voxxy.commands import voice as voice_commands
@@ -28,13 +29,15 @@ app = typer.Typer(
 
 daemon_app = typer.Typer(help="Stack lifecycle: start, stop, status, install.")
 engine_app = typer.Typer(help="Engine control: list, use, enable, disable, logs.")
-voice_app = typer.Typer(help="Voice management: list, info, add, delete.")
+voice_app = typer.Typer(help="Voice management: list, info, add, delete, persona.")
 sink_app = typer.Typer(help="Sink relay: route audio to the machine you're at.")
+persona_app = typer.Typer(help="Voice personas: list, show, dry-run rewrites.")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(engine_app, name="engine")
 app.add_typer(voice_app, name="voice")
 app.add_typer(sink_app, name="sink")
+app.add_typer(persona_app, name="persona")
 
 
 @app.callback()
@@ -67,6 +70,7 @@ listen_commands.register(app)
 # Engine, voice, and daemon commands.
 engine_commands.register(engine_app)
 voice_commands.register(voice_app)
+persona_commands.register(persona_app)
 listen_commands.register_sink(sink_app)
 daemon_commands.register(daemon_app)
 

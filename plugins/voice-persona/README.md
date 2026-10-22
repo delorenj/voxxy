@@ -47,12 +47,47 @@ tts:
     timeout_seconds: 40      # hard bound on the rewrite; on expiry the original text is spoken
     max_ratio: 1.8           # reject rewrites longer than input*max_ratio (+40 chars) -> original
     min_ratio: 0.5           # reject rewrites shorter than input*min_ratio -> original
+    voxxy_timeout_seconds: 3 # hard bound on the voxxy voice-record lookup (clamped 0.5..15)
 ```
 
-Resolution order: **file > name > auto_from_voice**. A missing persona is a no-op (logged once),
-never an error.
+Resolution order: **file > name > voxxy voice record > frontmatter `voices:`**. A missing persona is
+a no-op (logged once), never an error.
 
-### auto_from_voice mapping
+### Voxxy-level association (voice -> persona)
+
+The preferred way to say "this voice talks like this character" is on the voice itself, in voxxy,
+so every consumer (Hermes agents, `voxxy speak`, scripts) agrees:
+
+```bash
+voxxy voice persona peter peter-griffin   # associate
+voxxy voice persona peter                 # show stored + effective persona
+voxxy voice persona peter none            # explicitly NO persona (also blocks the frontmatter default)
+voxxy voice persona peter --clear         # back to "unset" (frontmatter default applies)
+# raw API: PUT /voices/peter/persona  {"persona": "peter-griffin" | "none" | null}
+```
+
+`voices.persona` semantics: `NULL` = unset (fall through to frontmatter `voices:`); `none` =
+explicitly no persona; anything else = a persona id, the basename of `personas/<id>.md`. Re-uploading
+a voice clip keeps its persona. The server stores the slug only; it never reads persona files.
+
+At speak time (only when `auto_from_voice` is true, a voice is set and the TTS provider is `vox`
+or unspecified) the plugin does `GET {base}/voices/{voice}`:
+
+- base URL: `tts.vox.base_url` from the profile config, else env `VOX_URL`, else `https://vox.delo.sh`
+- auth: `tts.vox.api_key` else env `VOX_API_KEY`, sent as `Authorization: Bearer` and `X-API-Key`
+  (same as the `vox` TTS provider)
+- hard timeout `tts.persona.voxxy_timeout_seconds` (default 3); results, including failures and
+  "unset", are cached in memory for 60s per (base, voice)
+- any failure (network, 404, bad JSON) is logged once and falls back to the frontmatter mapping;
+  a voxxy persona whose file is missing is a no-op (logged once), not a fallback
+
+Profile `tts.persona.name` / `file` still win over the voxxy association, so a profile can pin a
+persona regardless of the voice record.
+
+### auto_from_voice frontmatter mapping (fallback)
+
+When voxxy has no association for the voice (or cannot be reached), the bundled persona whose
+frontmatter `voices:` lists the voice is used:
 
 | `voice` kwarg (case-insensitive) | persona |
 | --- | --- |
@@ -68,6 +103,26 @@ Any other voice (e.g. `rick`) resolves to nothing and is spoken as-is.
 Drop a `PERSONA.md` in a profile's `HERMES_HOME` and set `file: PERSONA.md`. It wins over `name` and
 the voice mapping, and applies only to that profile.
 
+## CLI
+
+The `voxxy` CLI imports this module by file path (it imports cleanly without Hermes) and reuses the
+same prompt, sanitizer and validator, so a CLI rewrite behaves exactly like the hook:
+
+```bash
+voxxy persona list                       # bundled personas + which voices map to each
+voxxy persona show peter-griffin         # the character bible
+voxxy persona rewrite --voice peter "The build took 42 seconds."   # dry-run rewrite, no audio
+voxxy speak --voice peter --persona auto "..."                     # rewrite then synthesize
+```
+
+Public API (`__all__`): `list_personas()`, `persona_by_id(slug)`, `frontmatter_persona_for_voice(voice)`,
+`load_persona(path)`, `resolve_persona(cfg, voice, provider)`, `build_messages`, `sanitize_output`,
+`validate_rewrite`, `rewrite_with(text, persona, cfg, call) -> (replacement | None, reason | None)`,
+`PersonaConfig`, `PERSONAS_DIR`, `PROMPT_VERSION`. `call(messages, timeout=..., temperature=...) -> str`
+is the injected LLM caller; the hook injects Hermes' auxiliary client. Load it with
+`importlib.util.spec_from_file_location` and put the module in `sys.modules` before `exec_module`
+(its dataclasses need that).
+
 ## Persona file format
 
 Markdown with optional YAML frontmatter:
@@ -75,7 +130,7 @@ Markdown with optional YAML frontmatter:
 ```markdown
 ---
 name: Peter Griffin        # display name used in the prompt (default: file stem)
-voices: [peter]            # TTS voice ids that auto-select this persona
+voices: [peter]            # TTS voice ids that auto-select this persona (fallback when voxxy has no association)
 temperature: 0.8           # optional sampling temperature (default 0.7)
 description: one line
 ---

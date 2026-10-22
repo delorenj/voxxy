@@ -7,6 +7,7 @@ The `voices` table stores metadata and a relative filename under
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -14,6 +15,15 @@ from typing import Optional
 import asyncpg
 
 VOICES_DIR = Path(os.environ.get("VOX_VOICES_DIR", "/data/voices"))
+
+# voices.persona: NULL = no voxxy-level association (consumers fall back to persona frontmatter),
+# PERSONA_NONE = explicitly no persona, otherwise the basename of a persona file
+# (plugins/voice-persona/personas/<id>.md). The server stores the slug and never reads persona files.
+PERSONA_NONE = "none"
+PERSONA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+_VOICE_COLUMNS = """name, display_name, wav_path, duration_s, prompt_text, tags,
+                      elevenlabs_voice_id, vibevoice_ref_path, vibevoice_speaker_tag, persona"""
 
 
 @dataclass(slots=True)
@@ -31,6 +41,8 @@ class Voice:
     # NULL/None means "fall back to wav_path" for that engine.
     vibevoice_ref_path: Optional[str] = None
     vibevoice_speaker_tag: Optional[str] = None
+    # Voice -> persona association for spoken-text enrichment (see PERSONA_* above).
+    persona: Optional[str] = None
 
     @property
     def abs_path(self) -> Path:
@@ -62,18 +74,14 @@ class VoiceRepo:
 
     async def get(self, name: str) -> Optional[Voice]:
         row = await self._pool.fetchrow(
-            """SELECT name, display_name, wav_path, duration_s, prompt_text, tags,
-                      elevenlabs_voice_id, vibevoice_ref_path, vibevoice_speaker_tag
-               FROM voices WHERE name = $1""",
+            f"SELECT {_VOICE_COLUMNS} FROM voices WHERE name = $1",
             name,
         )
         return _row_to_voice(row) if row else None
 
     async def list(self) -> list[Voice]:
         rows = await self._pool.fetch(
-            """SELECT name, display_name, wav_path, duration_s, prompt_text, tags,
-                      elevenlabs_voice_id, vibevoice_ref_path, vibevoice_speaker_tag
-               FROM voices ORDER BY name"""
+            f"SELECT {_VOICE_COLUMNS} FROM voices ORDER BY name"
         )
         return [_row_to_voice(r) for r in rows]
 
@@ -90,6 +98,7 @@ class VoiceRepo:
         vibevoice_ref_path: Optional[str] = None,
         vibevoice_speaker_tag: Optional[str] = None,
     ) -> Voice:
+        # persona is deliberately absent from the ON CONFLICT set: re-uploading a clip keeps its association.
         row = await self._pool.fetchrow(
             """INSERT INTO voices (name, display_name, wav_path, source_path,
                                    duration_s, prompt_text, tags,
@@ -105,13 +114,20 @@ class VoiceRepo:
                    vibevoice_ref_path    = EXCLUDED.vibevoice_ref_path,
                    vibevoice_speaker_tag = EXCLUDED.vibevoice_speaker_tag,
                    updated_at            = now()
-               RETURNING name, display_name, wav_path, duration_s, prompt_text, tags,
-                         elevenlabs_voice_id, vibevoice_ref_path, vibevoice_speaker_tag""",
+               RETURNING """ + _VOICE_COLUMNS,
             name, display_name, wav_path, source_path,
             duration_s, prompt_text, tags or [],
             vibevoice_ref_path, vibevoice_speaker_tag,
         )
         return _row_to_voice(row)
+
+    async def set_persona(self, name: str, persona: Optional[str]) -> Optional[Voice]:
+        """Set (or with None, clear) the voice's persona; None result means no such voice."""
+        row = await self._pool.fetchrow(
+            "UPDATE voices SET persona = $2, updated_at = now() WHERE name = $1 RETURNING " + _VOICE_COLUMNS,
+            name, persona,
+        )
+        return _row_to_voice(row) if row else None
 
     async def delete(self, name: str) -> bool:
         res = await self._pool.execute("DELETE FROM voices WHERE name = $1", name)
@@ -129,4 +145,5 @@ def _row_to_voice(row) -> Voice:
         elevenlabs_voice_id=row["elevenlabs_voice_id"],
         vibevoice_ref_path=row["vibevoice_ref_path"],
         vibevoice_speaker_tag=row["vibevoice_speaker_tag"],
+        persona=row["persona"],
     )
