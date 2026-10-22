@@ -51,7 +51,8 @@
     "task-triage",
     "taste-design",
     "taxonomy-steward",
-    "vox-tts"
+    "vox-tts",
+    "g33-33god-integration"
   ],
   "exclude": [
     "bmad-build",
