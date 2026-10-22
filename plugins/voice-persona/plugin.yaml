@@ -1,0 +1,7 @@
+name: voice-persona
+version: 0.1.0
+description: "Rewrites spoken text in a character's voice (persona file) just before TTS, preserving every fact. Provider-agnostic; fail-open."
+author: Voxxy
+kind: standalone
+provides_hooks:
+  - transform_tts_text
