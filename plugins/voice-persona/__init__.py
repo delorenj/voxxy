@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "voice-persona/2"
+PROMPT_VERSION = "voice-persona/3"
 AUX_TASK = "tts_persona"
 PERSONAS_DIR = Path(__file__).resolve().parent / "personas"
 
@@ -76,6 +76,7 @@ CHARACTER BIBLE (name: {name}):
 
 USER_PROMPT = """\
 Rewrite the following text as spoken by {name}. Keep every fact. Output only the rewritten spoken text.
+Hard length cap: {max_chars} characters (the source is {source_chars}). Add one or two touches of flavor, not a monologue; if you are running long, cut flavor, never facts.
 
 <source>
 {text}
@@ -282,10 +283,13 @@ def resolve_persona(cfg: PersonaConfig, voice: Optional[str]) -> Optional[Person
 
 # --------------------------------------------------------------------------- LLM
 
-def build_messages(persona: Persona, text: str) -> List[Dict[str, str]]:
+def build_messages(persona: Persona, text: str, max_ratio: float = DEFAULT_MAX_RATIO) -> List[Dict[str, str]]:
+    # Tell the model the same bound validate_rewrite enforces, with a margin, so it aims under it.
+    max_chars = int((len(text) * max_ratio + RATIO_SLACK_CHARS) * 0.85)
     return [
         {"role": "system", "content": SYSTEM_PROMPT.format(name=persona.name, body=persona.body)},
-        {"role": "user", "content": USER_PROMPT.format(name=persona.name, text=text)},
+        {"role": "user", "content": USER_PROMPT.format(
+            name=persona.name, text=text, max_chars=max_chars, source_chars=len(text))},
     ]
 
 
@@ -396,7 +400,7 @@ def rewrite_text(text: str, persona: Persona, cfg: PersonaConfig) -> Optional[st
     """One persona rewrite; returns the validated replacement or None."""
     temperature = persona.temperature if persona.temperature is not None else DEFAULT_TEMPERATURE
     logger.debug("voice-persona: rewriting %d chars as %s (prompt %s)", len(text), persona.name, PROMPT_VERSION)
-    raw = _call_with_deadline(build_messages(persona, text), timeout=cfg.timeout_seconds, temperature=temperature)
+    raw = _call_with_deadline(build_messages(persona, text, cfg.max_ratio), timeout=cfg.timeout_seconds, temperature=temperature)
     if not raw:
         return None
     cleaned = sanitize_output(raw)
