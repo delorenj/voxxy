@@ -119,7 +119,7 @@ class TestConfig:
     def test_defaults(self) -> None:
         cfg = load_config()
         assert cfg.persona_base_url == "https://api.automaticai.io/v1"
-        assert cfg.persona_model == "automaticai/personal/glm-5.3-flash"
+        assert cfg.persona_model == "automaticai/auto/fast"
         assert cfg.persona_api_key_ref is None
 
     def test_old_config_file_still_loads(self, tmp_path: Path) -> None:
@@ -234,7 +234,7 @@ class TestLLM:
         assert llm([{"role": "user", "content": "x"}], timeout=3, temperature=0.4) == "hi there"
         assert seen["url"] == "https://api.automaticai.io/v1/chat/completions"
         assert seen["auth"] == "Bearer k-env"
-        assert seen["body"]["model"] == "automaticai/personal/glm-5.3-flash"
+        assert seen["body"]["model"] == "automaticai/auto/fast"
         assert seen["body"]["temperature"] == 0.4
 
     def test_env_overrides_config(self, monkeypatch: pytest.MonkeyPatch) -> None:

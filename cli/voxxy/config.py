@@ -28,7 +28,12 @@ CONFIG_PATH = Path.home() / ".config" / "voxxy" / "config.toml"
 # Module-level because Config is slots=True: `Config.field` is a slot descriptor,
 # not the default value.
 DEFAULT_PERSONA_BASE_URL = "https://api.automaticai.io/v1"
-DEFAULT_PERSONA_MODEL = "automaticai/personal/glm-5.3-flash"
+# Router aliases, never a named model: the gateway's auto router picks a live,
+# token-permitted route per call and walks past an exhausted one (a pinned
+# glm-5.3-flash ran out of weekly quota on 2026-10-28 and every rewrite failed).
+# The persona rewrite is latency-bound, so it takes the fast tier.
+DEFAULT_PERSONA_MODEL = "automaticai/auto/fast"
+DEFAULT_CLONE_MODEL = "automaticai/auto"
 
 
 class ProjectNotFound(Exception):
@@ -73,11 +78,11 @@ class Config:
     persona_base_url: str = DEFAULT_PERSONA_BASE_URL
     persona_model: str = DEFAULT_PERSONA_MODEL
     persona_api_key_ref: Optional[str] = None
-    # `voxxy voice clone` / `voxxy persona generate` use a (usually stronger,
-    # slower) model for identity resolution, video ranking and persona authoring.
-    # None means "inherit the persona_* setting", so a user who configured only
-    # the persona LLM gets a working clone LLM; see voxxy.llm.CloneLLM for the
-    # full env > config > inherited precedence.
+    # `voxxy voice clone` / `voxxy persona generate` do identity resolution,
+    # video ranking and persona authoring, which want the full router
+    # (DEFAULT_CLONE_MODEL), not the persona's fast tier. None for the base URL
+    # and key means "inherit the persona_* setting", so a user who configured
+    # only the persona endpoint gets a working clone LLM; see voxxy.llm.CloneLLM.
     clone_base_url: Optional[str] = None
     clone_model: Optional[str] = None
     clone_api_key_ref: Optional[str] = None

@@ -29,7 +29,7 @@ from typing import Any, Optional
 
 import httpx
 
-from voxxy.config import Config, load_config
+from voxxy.config import DEFAULT_CLONE_MODEL, Config, load_config
 
 DEFAULT_LLM_TIMEOUT = 40.0
 
@@ -182,7 +182,10 @@ class CloneLLM(ChatLLM):
     key_setting = "clone_api_key_ref"
 
     def _resolve(self, cfg: Config) -> tuple[str, str, Optional[str]]:
-        # env(clone) > config(clone) > env(persona) > config(persona) > default.
+        # Endpoint: env(clone) > config(clone) > env(persona) > config(persona).
+        # Model: env(clone) > config(clone) > DEFAULT_CLONE_MODEL. It does not
+        # inherit the persona model: that is the router's fast tier, too weak for
+        # identity resolution and persona authoring.
         base = (
             _first_env("VOXXY_CLONE_BASE_URL")
             or cfg.clone_base_url
@@ -192,8 +195,7 @@ class CloneLLM(ChatLLM):
         model = (
             _first_env("VOXXY_CLONE_MODEL")
             or cfg.clone_model
-            or _first_env("VOXXY_PERSONA_MODEL")
-            or cfg.persona_model
+            or DEFAULT_CLONE_MODEL
         )
         self._clone_ref = cfg.clone_api_key_ref or None
         self._persona_ref = cfg.persona_api_key_ref or None

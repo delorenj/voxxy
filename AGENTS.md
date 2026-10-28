@@ -99,7 +99,7 @@ voxxy version                                    # CLI + server version
 
 The clone commands need the optional extra (`uv tool install --editable "$HOME/code/voxxy/cli[clone]" --force`) and should run through `heavy` (whisper is CPU-hungry). Method, A/B scoring and step-by-step workflows live in the `vox-tts` skill (`references/reference-clip-quality.md`, `references/voice-workflows.md`); saved Claude Code workflows `voxxy-voice-clone` and `voxxy-voice-upgrade` are in `.claude/workflows/`. `voice clone`/`persona generate` use `VOXXY_CLONE_*` (falls back to `VOXXY_PERSONA_*`).
 
-The persona rewrite calls an OpenAI-compatible endpoint: `VOXXY_PERSONA_BASE_URL` / `persona_base_url` (default `https://api.automaticai.io/v1`), `VOXXY_PERSONA_MODEL` / `persona_model` (default `automaticai/personal/glm-5.3-flash`), key from `VOXXY_PERSONA_API_KEY` or an `op://` reference in `persona_api_key_ref` (`~/.config/voxxy/config.toml`). Details in `cli/README.md`.
+The persona rewrite calls an OpenAI-compatible endpoint: `VOXXY_PERSONA_BASE_URL` / `persona_base_url` (default `https://api.automaticai.io/v1`), `VOXXY_PERSONA_MODEL` / `persona_model` (default `automaticai/auto/fast`; `voice clone` / `persona generate` default to `automaticai/auto`. Never pin a named model: the gateway router picks a live route and skips exhausted ones), key from `VOXXY_PERSONA_API_KEY` or an `op://` reference in `persona_api_key_ref` (`~/.config/voxxy/config.toml`). Details in `cli/README.md`.
 
 All list/info/status/health commands accept `--json` for machine consumption. `scripts/vox-speak` is preserved as a compat shim: it `exec`s into `voxxy speak` with the same flag surface (`--voice`, `--raw`, `--via`, `--url`).
 

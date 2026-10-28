@@ -103,10 +103,10 @@ class TestExtractJson:
 
 
 class TestCloneConfig:
-    def test_defaults_inherit_persona_settings(self) -> None:
+    def test_defaults_inherit_persona_endpoint_and_use_the_router(self) -> None:
         llm = CloneLLM(Config())
         assert llm.base_url == "https://api.automaticai.io/v1"
-        assert llm.model == "automaticai/personal/glm-5.3-flash"
+        assert llm.model == "automaticai/auto"
         assert llm.key_ref is None
 
     def test_clone_config_overrides_persona_config(self) -> None:
@@ -119,9 +119,10 @@ class TestCloneConfig:
         llm = CloneLLM(Config(persona_base_url="http://p/v1", persona_model="p-model", clone_model="c-model"))
         assert (llm.base_url, llm.model) == ("http://p/v1", "c-model")
 
-    def test_persona_env_beats_persona_config_for_clone(self, monkeypatch) -> None:
+    def test_clone_model_never_inherits_the_persona_model(self, monkeypatch) -> None:
+        # The persona model is the router's fast tier; clone wants the full router.
         monkeypatch.setenv("VOXXY_PERSONA_MODEL", "env-persona-model")
-        assert CloneLLM(Config(persona_model="cfg-persona")).model == "env-persona-model"
+        assert CloneLLM(Config(persona_model="cfg-persona")).model == "automaticai/auto"
 
     def test_clone_config_beats_persona_env(self, monkeypatch) -> None:
         monkeypatch.setenv("VOXXY_PERSONA_MODEL", "env-persona-model")
@@ -184,7 +185,7 @@ class TestCloneConfig:
     def test_old_config_has_no_clone_keys(self, tmp_path: Path) -> None:
         (tmp_path / "config.toml").write_text('persona_model = "pm"\n')
         cfg = load_config()
-        assert cfg.clone_model is None and CloneLLM(cfg).model == "pm"
+        assert cfg.clone_model is None and CloneLLM(cfg).model == "automaticai/auto"
 
     def test_timeout_env(self, monkeypatch) -> None:
         assert CloneLLM(Config()).timeout == 120.0

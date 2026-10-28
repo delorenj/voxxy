@@ -193,14 +193,15 @@ exists.
 
 Same OpenAI-compatible mechanics as the persona LLM, separate settings so you can point the
 (rare, quality-over-latency) clone steps at a stronger model. Each unset clone setting
-inherits the persona one. Precedence, highest first, for the URL, model and key alike:
+inherits the persona one, except the model. Precedence, highest first, for the URL and key:
 `VOXXY_CLONE_*` env, `clone_*` in config.toml, `VOXXY_PERSONA_*` env, `persona_*` in
-config.toml, built-in default.
+config.toml, built-in default. The model is `VOXXY_CLONE_MODEL`, then `clone_model`, then
+`automaticai/auto`.
 
 | Setting | Env | `~/.config/voxxy/config.toml` | Default |
 | --- | --- | --- | --- |
 | base URL | `VOXXY_CLONE_BASE_URL` | `clone_base_url` | the persona base URL |
-| model | `VOXXY_CLONE_MODEL` | `clone_model` | the persona model |
+| model | `VOXXY_CLONE_MODEL` | `clone_model` | `automaticai/auto` (does not inherit the persona model) |
 | API key | `VOXXY_CLONE_API_KEY` | `clone_api_key_ref` (an `op://` reference) | the persona key |
 | timeout (s) | `VOXXY_CLONE_TIMEOUT` | - | `120` |
 
@@ -266,7 +267,7 @@ The CLI calls an OpenAI-compatible `POST {base}/chat/completions`.
 | Setting | Env (wins) | `~/.config/voxxy/config.toml` | Default |
 | --- | --- | --- | --- |
 | base URL | `VOXXY_PERSONA_BASE_URL` | `persona_base_url` | `https://api.automaticai.io/v1` |
-| model | `VOXXY_PERSONA_MODEL` | `persona_model` | `automaticai/personal/glm-5.3-flash` |
+| model | `VOXXY_PERSONA_MODEL` | `persona_model` | `automaticai/auto/fast` (router alias, never a named model) |
 | API key | `VOXXY_PERSONA_API_KEY` | `persona_api_key_ref` (an `op://` reference, resolved with `op read` at call time) | none: errors with instructions |
 | timeout (s) | `VOXXY_PERSONA_TIMEOUT` | - | `40` |
 

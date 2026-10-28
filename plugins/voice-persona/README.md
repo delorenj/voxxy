@@ -176,14 +176,15 @@ Nothing is cached to disk; parsed personas are cached in memory by (path, mtime)
 `tts_persona` is a normal auxiliary task. With nothing configured it follows `provider: auto`, the
 main route (provider `auto`), which on the AutomaticAI gateway is a reasoning model: expect roughly
 18-24s for a 3-4 sentence reply, so the plugin default is `timeout_seconds: 40` (core's own bound is 45)
-and a longer reply can still time out and be spoken unchanged. On this fleet the Hermes base config pins
-`auxiliary.tts_persona` to glm-5.3-flash (2026-10-24, ~5s), so every desk inherits a fast route:
+and a longer reply can still time out and be spoken unchanged. On this fleet the Hermes base config points
+`auxiliary.tts_persona` at the router's fast tier (2026-10-28, ~5s), so every desk inherits a fast route
+that never names a model (a pinned glm-5.3-flash exhausted its weekly quota and silenced every persona):
 
 ```yaml
 auxiliary:
   tts_persona:
     provider: automaticai
-    model: automaticai/personal/glm-5.3-flash   # any fast, non-reasoning model
+    model: automaticai/auto/fast   # router alias; never a named model
     timeout: 40
 ```
 
