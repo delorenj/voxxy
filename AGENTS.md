@@ -55,8 +55,13 @@ voxxy engine logs voxcpm        # docker logs -f voxxy-engine-voxcpm
 # Voices
 voxxy voice list
 voxxy voice info rick
-voxxy voice add /path/to/clip.wav                # interactive: preprocess + metadata + upload
+voxxy voice add /path/to/clip.wav                # interactive: preprocess + metadata + upload (no transcript: avoid for real voices)
 voxxy voice add /path/to/clip.wav --name demo --tags demo,male --no-prompt
+voxxy voice add talk.mp3 --auto -n brian         # HIGH QUALITY: whisper + clean 10-15 s sentence-boundary cut + prompt_text
+voxxy voice add talk.mp3 --start 12.6 --end 26.1 -n brian   # you pick the window, transcript is automatic
+voxxy voice add clip.wav -n brian --prompt-text "exact words spoken in the clip"
+heavy voxxy voice candidates talk.mp3 --top 5    # rank clean windows in a recording, uploads nothing
+heavy voxxy voice clone "the dog from Family Guy"   # description -> web search -> YouTube -> clean clip -> voice + persona (--yes --pick N, --dry-run, --no-persona)
 voxxy voice delete <name> --yes
 voxxy voice persona peter                        # show voxxy-level persona + effective one (and its source)
 voxxy voice persona peter peter-griffin          # associate a persona with a voice (stored on the server)
@@ -66,6 +71,7 @@ voxxy voice persona peter --clear                # drop the association (back to
 # Personas (plugins/voice-persona/personas/*.md; logic lives in the Hermes plugin, the CLI imports it)
 voxxy persona list                               # bundled personas + which voices map to each
 voxxy persona show peter-griffin [--raw]         # render the persona markdown
+voxxy persona generate brian-griffin -c "Brian Griffin from Family Guy" --voice brian   # LLM-author a persona file (--dry-run, --force)
 voxxy persona rewrite peter-griffin "text"       # dry-run in-character rewrite (no audio); non-zero + reason if rejected
 voxxy persona rewrite --voice peter "text" --json
 voxxy persona path                               # personas directory
@@ -90,6 +96,8 @@ voxxy logs core                                  # docker logs -f vox
 voxxy logs voxcpm                                # docker logs -f voxxy-engine-voxcpm
 voxxy version                                    # CLI + server version
 ```
+
+The clone commands need the optional extra (`uv tool install --editable "$HOME/code/voxxy/cli[clone]" --force`) and should run through `heavy` (whisper is CPU-hungry). Method, A/B scoring and step-by-step workflows live in the `vox-tts` skill (`references/reference-clip-quality.md`, `references/voice-workflows.md`); saved Claude Code workflows `voxxy-voice-clone` and `voxxy-voice-upgrade` are in `.claude/workflows/`. `voice clone`/`persona generate` use `VOXXY_CLONE_*` (falls back to `VOXXY_PERSONA_*`).
 
 The persona rewrite calls an OpenAI-compatible endpoint: `VOXXY_PERSONA_BASE_URL` / `persona_base_url` (default `https://api.automaticai.io/v1`), `VOXXY_PERSONA_MODEL` / `persona_model` (default `automaticai/personal/glm-5.3-flash`), key from `VOXXY_PERSONA_API_KEY` or an `op://` reference in `persona_api_key_ref` (`~/.config/voxxy/config.toml`). Details in `cli/README.md`.
 
@@ -141,7 +149,7 @@ Incremental migrations against an existing DB:
 mise run migrate      # applies every file under migrations/ in order
 ```
 
-There is no test suite, linter config, or CI in-repo yet. Don't invent commands for those.
+The CLI has a pytest suite (`cd cli && uv run pytest -q`). There is no linter config or CI in-repo yet. Don't invent commands for those.
 
 ## Architecture (the parts that span files)
 
@@ -216,6 +224,7 @@ Both engines share the same shape and are independently buildable / runnable.
 - **`voxxy listen` needs ffmpeg on the listening machine.** The relay ships OGG/Opus (what the cache already stores); CoreAudio has no Opus decoder, so `afplay` would refuse it. `cli/voxxy/playback.py:decode_to_wav` normalizes to WAV first — one path for every platform. Don't "optimize" it away by handing the OGG straight to the player.
 - Playback helpers live in `cli/voxxy/playback.py`, shared by `speak` and `listen`. `commands/speak.py` re-exports the underscore names (`_play_wav`, …) so pre-split imports and tests keep working.
 - The MCP tool that lists voices is named `list_voices_tool` in Python but surfaces as `vox:list_voices` — FastMCP strips the `_tool` suffix convention; keep it when adding new tools.
+- **`prompt_text` is the main cloning-quality lever and every voice should have one.** The exact transcript of the reference clip switches voxcpm into continuation mode: on `arnold`, ECAPA similarity went 0.59 (old upload) to 0.72 (clean sentence-boundary cut) to 0.82-0.85 (same cut + transcript). Create voices with `voice clone` or `voice add --auto` (never raw first-30s uploads), keep clips 10-15 s of one speaker cut at pauses, re-encode (never stream-copy), and check the synthesis engine is `voxcpm` (ElevenLabs fallback ignores the reference). Upgrade old voices with the `voxxy-voice-upgrade` workflow; `voxxy voice list --json` shows which have `prompt_text` null.
 - `prompt_text` on a voice row switches voxcpm generation from "voice clone" mode to "Ultimate Cloning" mode (uses `prompt_wav_path` + `prompt_text` together). Only set it when you have an accurate transcript of the reference audio. VibeVoice ignores `prompt_text` entirely.
 - `voices/**/*` is gitignored — only `voices/rick.wav` (the seed) is tracked. Don't commit uploaded voices.
 - `audio-cache/` is gitignored in its entirety; contents are ephemeral.

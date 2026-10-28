@@ -24,3 +24,9 @@ def fake_voxxy_root(tmp_path: Path) -> Path:
     (root / "compose.yml").write_text("# fake compose\n")
     (root / "engines").mkdir()
     return root
+
+
+@pytest.fixture(autouse=True)
+def _no_real_ecapa(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never spawn the torch helper from a test; speakergate tests inject their own runner."""
+    monkeypatch.setenv("VOXXY_VOICE_GATE", "off")

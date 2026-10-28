@@ -21,6 +21,18 @@ dependencies = [
     "pyyaml>=6",
 ]
 
+[project.optional-dependencies]
+# Heavy audio/ASR deps for `voxxy voice clone|candidates` and `voice add --auto`.
+# Optional so `voxxy health`, `speak`, ... stay light; refclip.py imports them
+# lazily and tells the user the exact install command when they are missing.
+clone = [
+    "faster-whisper>=1.0",
+    "numpy>=1.26",
+    "soundfile>=0.12",
+    "scipy>=1.11",
+    "yt-dlp>=2024.8.6",
+]
+
 [project.scripts]
 voxxy = "voxxy.app:main"
 voxxy-http-tts = "voxxy.http_tts:main"
@@ -38,4 +50,7 @@ packages = ["voxxy"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    # refclip's numeric tests run in the default `uv run pytest` env, not only with --extra clone.
+    "numpy>=1.26",
+    "scipy>=1.11",
 ]

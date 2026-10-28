@@ -1,7 +1,8 @@
 """Voice CRUD commands.
 
 `list`, `info`, `add`, `delete`, plus `persona` to associate a Hermes
-voice-persona character with a voice at the voxxy level.
+voice-persona character with a voice at the voxxy level. `candidates` and `clone`
+(the clean-reference-clip workflow) live in :mod:`voxxy.commands.voice_clone`.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ from voxxy.audio import (
     probe,
     preprocess,
 )
+from voxxy import refclip
 from voxxy.client import VoxClient, VoxNotFound, VoxUnreachable, VoxValidationError
+from voxxy.commands import voice_clone
 from voxxy.config import load_config
 from voxxy.persona import (
     NONE_SENTINEL,
@@ -47,6 +50,7 @@ def register(voice_app: typer.Typer) -> None:
     voice_app.command("add")(add)
     voice_app.command("delete")(delete)
     voice_app.command("persona")(persona)
+    voice_clone.register(voice_app)
 
 
 def list_voices(
@@ -255,8 +259,37 @@ def add(
     ),
     sample_rate: int = typer.Option(24000, "-R", "--sample-rate"),
     no_prompt: bool = typer.Option(False, "-N", "--no-prompt", help="Skip interactive prompts; --name required."),
+    prompt_text: str | None = typer.Option(
+        None, "--prompt-text",
+        help="Exact transcript of the uploaded audio. Switches voxcpm to continuation mode "
+             "(the biggest cloning-quality lever). Must match the clip word for word.",
+    ),
+    auto: bool = typer.Option(
+        False, "--auto",
+        help="Transcribe, pick the cleanest 10-15 s window, export it cleanly and set prompt_text "
+             "automatically (needs the clone extra).",
+    ),
+    start: float | None = typer.Option(None, "--start", help="Clip start in seconds (clean export; transcript is automatic)."),
+    end: float | None = typer.Option(None, "--end", help="Clip end in seconds (default: start + --max-seconds)."),
+    min_seconds: float = typer.Option(refclip.DEFAULT_MIN_SECONDS, "--min-seconds", help="With --auto: shortest clip."),
+    max_seconds: float = typer.Option(refclip.DEFAULT_MAX_SECONDS, "--max-seconds", help="With --auto/--start: longest clip."),
 ) -> None:
-    """Upload an audio file as a new voice profile."""
+    """Upload an audio file as a new voice profile.
+
+    Plain `voice add FILE` keeps its original behaviour (first --trim-seconds of
+    audio, no transcript). The new flags are the high-quality path:
+
+    \b
+      --prompt-text TEXT   you already have the exact transcript
+      --auto               pick the cleanest window and transcribe it for you
+      --start S [--end E]  you pick the window, the transcript is automatic
+
+    Examples:
+
+      voxxy voice add talk.mp3 --auto --name brian
+      voxxy voice add talk.mp3 --start 12.6 --end 26.1 --name brian
+      voxxy voice add clip.wav --name brian --prompt-text "exact words spoken in the clip"
+    """
     # 1. Verify source path exists and is readable.
     if not path.exists():
         typer.secho(f"not found: {path}", fg=typer.colors.RED, err=True)
@@ -286,24 +319,41 @@ def add(
 
     # 4. Preprocess to temp WAV.
     tmp_path: str | None = None
+    clean_export = auto or start is not None or end is not None
+    if clean_export and (min_seconds <= 0 or max_seconds < min_seconds):
+        typer.secho("need 0 < --min-seconds <= --max-seconds", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
     try:
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_fh:
             tmp_path = tmp_fh.name
 
-        try:
-            preprocess(
-                src=path,
-                dst=Path(tmp_path),
-                sample_rate=sample_rate,
-                channels=1,
-                trim_seconds=trim_seconds,
+        if clean_export:
+            # High-quality path: a sentence-aligned, cleaned window plus its exact
+            # transcript. Replaces the plain trim below.
+            prompt_text = _clean_reference(
+                path, Path(tmp_path), src_info.duration, auto=auto, start=start, end=end,
+                min_seconds=min_seconds, max_seconds=max_seconds, prompt_text=prompt_text,
             )
-        except FfmpegMissing as exc:
-            typer.secho(str(exc), fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=1)
-        except RuntimeError as exc:
-            typer.secho(f"preprocessing failed: {exc}", fg=typer.colors.RED, err=True)
-            raise typer.Exit(code=1)
+        else:
+            try:
+                preprocess(
+                    src=path,
+                    dst=Path(tmp_path),
+                    sample_rate=sample_rate,
+                    channels=1,
+                    trim_seconds=trim_seconds,
+                )
+            except FfmpegMissing as exc:
+                typer.secho(str(exc), fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+            except RuntimeError as exc:
+                typer.secho(f"preprocessing failed: {exc}", fg=typer.colors.RED, err=True)
+                raise typer.Exit(code=1)
+            if prompt_text:
+                console.print(
+                    "[dim]prompt_text is stored as given; it must be the exact words in the uploaded "
+                    f"first {trim_seconds:g}s or continuation mode will drift[/dim]"
+                )
 
         # 5. Print preprocessed info.
         try:
@@ -380,7 +430,7 @@ def add(
                 display_name=display_name,
                 audio_path=Path(tmp_path),
                 tags=tag_list if tag_list else None,
-                prompt_text=None,
+                prompt_text=prompt_text.strip() if prompt_text and prompt_text.strip() else None,
             )
         except VoxUnreachable as exc:
             typer.secho(f"unreachable: {exc}", fg=typer.colors.RED, err=True)
@@ -397,6 +447,7 @@ def add(
                 f"[bold]tags[/bold]:          {', '.join(voice.tags) if voice.tags else '-'}",
                 f"[bold]vibevoice_ref[/bold]: {voice.vibevoice_ref_path or '(auto-populated from wav_path)'}",
                 f"[bold]engines[/bold]:       {engines}",
+                f"[bold]prompt_text[/bold]:   {voice.prompt_text or '-'}",
             ]
         )
         console.print(Panel(body, title=f"[green]created: {voice.name}[/green]", border_style="green"))
@@ -405,6 +456,53 @@ def add(
         # 10. Always clean up the temp file.
         if tmp_path is not None:
             Path(tmp_path).unlink(missing_ok=True)
+
+
+def _clean_reference(
+    src: Path, dst: Path, source_duration: float, *, auto: bool, start: float | None, end: float | None,
+    min_seconds: float, max_seconds: float, prompt_text: str | None,
+) -> str:
+    """Write the cleaned window to ``dst`` and return the prompt_text to upload.
+
+    --auto analyses the whole file and takes the best window; --start/--end export an
+    explicit span and only transcribe that span (cheap). An explicit --prompt-text
+    always wins over the automatic transcript.
+    """
+    if auto:
+        analysis = voice_clone.analyze_or_exit(src, min_seconds=min_seconds, max_seconds=max_seconds)
+        best = analysis.top(1)
+        if not best:
+            typer.secho(
+                f"no clean {min_seconds:g}-{max_seconds:g}s window found. See `voxxy voice candidates {src}` "
+                "for why, or choose a span with --start/--end.",
+                fg=typer.colors.RED, err=True,
+            )
+            raise typer.Exit(code=1)
+        marker = best[0]
+        console.print(
+            f"auto: [cyan]{marker.start:.2f}-{marker.end:.2f}s[/cyan] "
+            f"(score {marker.score:.2f}) [dim]{marker.text[:90]}[/dim]"
+        )
+        lo, hi, fallback = marker.start, marker.end, marker.text
+    else:
+        lo = start if start is not None else 0.0
+        hi = end if end is not None else lo + max_seconds
+        if source_duration > 0:
+            hi = min(hi, source_duration)
+        if lo < 0 or hi <= lo:
+            typer.secho(f"invalid window {lo:g}-{hi:g}s", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=2)
+        if hi - lo > 30.0:
+            typer.secho(
+                f"warning: {hi - lo:.0f}s window; the server keeps ~30s and long clips dilute the transcript benefit",
+                fg=typer.colors.YELLOW, err=True,
+            )
+        fallback = ""
+        console.print(f"window: [cyan]{lo:.2f}-{hi:.2f}s[/cyan]")
+    with console.status("[cyan]exporting and transcribing the clip[/cyan]"):
+        prepared = voice_clone.prepare_clip(src, dst, lo, hi, fallback_text=fallback, prompt_text=prompt_text)
+    console.print(f"prompt_text: [dim]{prepared.prompt_text}[/dim]")
+    return prepared.prompt_text
 
 
 def delete(

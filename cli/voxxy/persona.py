@@ -22,16 +22,15 @@ from __future__ import annotations
 import importlib.util
 import os
 import re
-import subprocess
+import subprocess  # noqa: F401 - tests patch bridge.subprocess.run (shared with voxxy.llm)
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-import httpx
-
-from voxxy.config import Config, discover_project_root, load_config
+from voxxy.config import Config, discover_project_root
+from voxxy.llm import ChatLLM, LLMError
 
 PLUGIN_MODULE_NAME = "voxxy_voice_persona_plugin"
 PLUGIN_RELPATH = Path("plugins") / "voice-persona" / "__init__.py"
@@ -42,12 +41,10 @@ PERSONA_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 # frontmatter fallback).
 NONE_SENTINEL = "none"
 
-DEFAULT_LLM_TIMEOUT = 40.0
-
 _plugin_cache: dict[str, Any] = {}
 
 
-class PersonaError(Exception):
+class PersonaError(LLMError):
     """Anything that stops a persona operation (plugin missing, LLM failure, ...)."""
 
 
@@ -187,106 +184,26 @@ def effective_persona(voice: str, record_persona: Optional[str], plugin: Optiona
 # ---------- LLM caller ----------
 
 
-class PersonaLLM:
+class PersonaLLM(ChatLLM):
     """OpenAI-compatible chat caller injected into the plugin's ``rewrite_with``.
 
+    The HTTP/auth mechanics are shared with the clone pipeline (:mod:`voxxy.llm`).
     Config precedence per setting: env > config.toml > built-in default.
     ``last_error`` carries the real failure (HTTP status, missing key) because
     ``rewrite_with`` reports failures as a bare ``(None, reason)``.
     """
 
-    def __init__(self, cfg: Optional[Config] = None, *, transport: Optional[httpx.BaseTransport] = None) -> None:
-        cfg = cfg or load_config()
-        self.base_url = (os.environ.get("VOXXY_PERSONA_BASE_URL") or cfg.persona_base_url).rstrip("/")
-        self.model = os.environ.get("VOXXY_PERSONA_MODEL") or cfg.persona_model
-        self.key_ref = cfg.persona_api_key_ref
-        self.timeout = _env_timeout()
-        self.last_error: Optional[str] = None
-        self._transport = transport
-        self._api_key: Optional[str] = None
+    label = "persona"
+    error_cls = PersonaError
+    key_env_names = ("VOXXY_PERSONA_API_KEY",)
+    key_setting = "persona_api_key_ref"
 
-    def api_key(self) -> str:
-        if self._api_key:
-            return self._api_key
-        env_key = (os.environ.get("VOXXY_PERSONA_API_KEY") or "").strip()
-        if env_key:
-            self._api_key = env_key
-            return env_key
-        if self.key_ref:
-            self._api_key = _read_op_ref(self.key_ref)
-            return self._api_key
-        raise PersonaError(
-            "no persona LLM key: set VOXXY_PERSONA_API_KEY, or put an op:// reference in "
-            "~/.config/voxxy/config.toml as persona_api_key_ref "
-            "(e.g. persona_api_key_ref = \"op://DeLoSecrets/<item-uuid>/credential\")"
+    def _resolve(self, cfg: Config) -> tuple[str, str, Optional[str]]:
+        return (
+            os.environ.get("VOXXY_PERSONA_BASE_URL") or cfg.persona_base_url,
+            os.environ.get("VOXXY_PERSONA_MODEL") or cfg.persona_model,
+            cfg.persona_api_key_ref,
         )
-
-    def __call__(self, messages: list[dict], *, timeout: Optional[float] = None, temperature: float = 0.7) -> str:
-        self.last_error = None
-        try:
-            return self._complete(messages, timeout=timeout, temperature=temperature)
-        except PersonaError as exc:
-            self.last_error = str(exc)
-            raise
-
-    def _complete(self, messages: list[dict], *, timeout: Optional[float], temperature: float) -> str:
-        key = self.api_key()
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "stream": False,
-        }
-        try:
-            with httpx.Client(timeout=timeout or self.timeout, transport=self._transport) as http:
-                resp = http.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    headers={"Authorization": f"Bearer {key}"},
-                )
-        except httpx.TimeoutException as exc:
-            raise PersonaError(f"persona LLM timed out ({exc})") from exc
-        except httpx.HTTPError as exc:
-            raise PersonaError(f"persona LLM unreachable at {self.base_url}: {exc}") from exc
-        if resp.status_code >= 400:
-            raise PersonaError(f"persona LLM returned {resp.status_code}: {resp.text[:200]}")
-        try:
-            content = resp.json()["choices"][0]["message"]["content"]
-        except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise PersonaError(f"persona LLM returned an unexpected body: {resp.text[:200]}") from exc
-        if isinstance(content, list):  # content-parts shape
-            content = "".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in content)
-        if not isinstance(content, str) or not content.strip():
-            raise PersonaError("persona LLM returned empty content")
-        return content
-
-
-def _env_timeout() -> float:
-    raw = os.environ.get("VOXXY_PERSONA_TIMEOUT")
-    if raw:
-        try:
-            value = float(raw)
-            if value > 0:
-                return value
-        except ValueError:
-            pass
-    return DEFAULT_LLM_TIMEOUT
-
-
-def _read_op_ref(ref: str) -> str:
-    if not ref.startswith("op://"):
-        raise PersonaError("persona_api_key_ref must be an op:// reference (raw keys are never stored in config)")
-    try:
-        proc = subprocess.run(["op", "read", ref], capture_output=True, text=True, timeout=20)
-    except FileNotFoundError as exc:
-        raise PersonaError("persona_api_key_ref is set but the 'op' CLI is not installed") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise PersonaError("'op read' timed out resolving persona_api_key_ref") from exc
-    key = proc.stdout.strip()
-    if proc.returncode != 0 or not key:
-        detail = (proc.stderr or "").strip().splitlines()
-        raise PersonaError(f"'op read' failed for persona_api_key_ref: {detail[-1] if detail else 'empty result'}")
-    return key
 
 
 # ---------- rewrite ----------

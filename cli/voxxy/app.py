@@ -29,9 +29,9 @@ app = typer.Typer(
 
 daemon_app = typer.Typer(help="Stack lifecycle: start, stop, status, install.")
 engine_app = typer.Typer(help="Engine control: list, use, enable, disable, logs.")
-voice_app = typer.Typer(help="Voice management: list, info, add, delete, persona.")
+voice_app = typer.Typer(help="Voice management: list, info, add, candidates, clone, delete, persona.")
 sink_app = typer.Typer(help="Sink relay: route audio to the machine you're at.")
-persona_app = typer.Typer(help="Voice personas: list, show, dry-run rewrites.")
+persona_app = typer.Typer(help="Voice personas: list, show, dry-run rewrites, generate.")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(engine_app, name="engine")

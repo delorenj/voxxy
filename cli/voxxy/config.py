@@ -73,6 +73,14 @@ class Config:
     persona_base_url: str = DEFAULT_PERSONA_BASE_URL
     persona_model: str = DEFAULT_PERSONA_MODEL
     persona_api_key_ref: Optional[str] = None
+    # `voxxy voice clone` / `voxxy persona generate` use a (usually stronger,
+    # slower) model for identity resolution, video ranking and persona authoring.
+    # None means "inherit the persona_* setting", so a user who configured only
+    # the persona LLM gets a working clone LLM; see voxxy.llm.CloneLLM for the
+    # full env > config > inherited precedence.
+    clone_base_url: Optional[str] = None
+    clone_model: Optional[str] = None
+    clone_api_key_ref: Optional[str] = None
 
 
 def load_config() -> Config:
@@ -101,6 +109,9 @@ def load_config() -> Config:
         persona_base_url=raw.get("persona_base_url") or DEFAULT_PERSONA_BASE_URL,
         persona_model=raw.get("persona_model") or DEFAULT_PERSONA_MODEL,
         persona_api_key_ref=raw.get("persona_api_key_ref") or None,
+        clone_base_url=raw.get("clone_base_url") or None,
+        clone_model=raw.get("clone_model") or None,
+        clone_api_key_ref=raw.get("clone_api_key_ref") or None,
     )
 
 
@@ -129,6 +140,12 @@ def save_config(cfg: Config) -> None:
         data["persona_model"] = cfg.persona_model
     if cfg.persona_api_key_ref:
         data["persona_api_key_ref"] = cfg.persona_api_key_ref
+    if cfg.clone_base_url:
+        data["clone_base_url"] = cfg.clone_base_url
+    if cfg.clone_model:
+        data["clone_model"] = cfg.clone_model
+    if cfg.clone_api_key_ref:
+        data["clone_api_key_ref"] = cfg.clone_api_key_ref
     if cfg.project_root is not None:
         data["project_root"] = str(cfg.project_root)
 

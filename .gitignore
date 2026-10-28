@@ -24,3 +24,9 @@ agents/hermes/*/runtime/
 
 # Canonical agent config lives in .agents; generated skill projections stay local.
 /.agents/skills
+
+# Shared Claude Code workflows are source. The global ignore hides all of .claude/,
+# so re-include the directory, ignore its contents, and un-ignore workflows/ only.
+!.claude/
+.claude/*
+!.claude/workflows/

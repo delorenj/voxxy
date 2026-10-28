@@ -140,7 +140,7 @@ def test_auto_from_voice_mapping(vp, voice, persona) -> None:
 
 def test_auto_from_voice_unknown_voice_and_switch(vp) -> None:
     _cfg(vp)
-    assert vp.resolve_persona(vp._persona_config(), "rick") is None
+    assert vp.resolve_persona(vp._persona_config(), "no-such-voice") is None
     assert vp.resolve_persona(vp._persona_config(), None) is None
     _cfg(vp, auto_from_voice=False)
     assert vp.resolve_persona(vp._persona_config(), "peter") is None
@@ -514,7 +514,10 @@ def test_public_api_surface() -> None:
 
 def test_list_personas_and_persona_by_id() -> None:
     vp = _load_plugin_module()
-    assert [p.id for p in vp.list_personas()] == ["george-carlin", "peter-griffin", "steve-brule"]
+    ids = [p.id for p in vp.list_personas()]
+    # Every bundled file is listed, sorted; the set grows as voices get personas.
+    assert ids == sorted(f.stem for f in vp.PERSONAS_DIR.glob("*.md"))
+    assert {"george-carlin", "peter-griffin", "steve-brule"} <= set(ids)
     assert vp.persona_by_id("peter-griffin").name == "Peter Griffin"
     for bad in ("nope", "../x", "", None, "-x"):
         assert vp.persona_by_id(bad) is None
@@ -524,7 +527,7 @@ def test_frontmatter_persona_for_voice() -> None:
     vp = _load_plugin_module()
     assert vp.frontmatter_persona_for_voice("Peter").id == "peter-griffin"
     assert vp.frontmatter_persona_for_voice("peter.wav").id == "peter-griffin"
-    assert vp.frontmatter_persona_for_voice("rick") is None
+    assert vp.frontmatter_persona_for_voice("no-such-voice") is None
     assert vp.frontmatter_persona_for_voice(None) is None
 
 

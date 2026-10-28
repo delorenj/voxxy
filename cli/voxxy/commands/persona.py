@@ -19,8 +19,10 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
+from voxxy import clone as cl
 from voxxy.client import VoxClient, VoxError, VoxNotFound, VoxUnreachable
 from voxxy.config import ProjectNotFound, load_config
+from voxxy.llm import CloneLLM
 from voxxy.persona import (
     PersonaError,
     PersonaLLM,
@@ -39,6 +41,7 @@ def register(persona_app: typer.Typer) -> None:
     persona_app.command("show")(show)
     persona_app.command("rewrite")(rewrite_cmd)
     persona_app.command("path")(path_cmd)
+    persona_app.command("generate")(generate)
 
 
 def _plugin_or_exit() -> Any:
@@ -238,3 +241,71 @@ def path_cmd() -> None:
     plugin = _plugin_or_exit()
     typer.echo(str(plugin.PERSONAS_DIR))
 
+
+
+def generate(
+    persona: str = typer.Argument(..., metavar="PERSONA-ID", help="New persona id: lowercase a-z0-9 and dashes (brian-griffin)."),
+    character: str = typer.Option(..., "-c", "--character", help='Who it is, e.g. "Brian Griffin from Family Guy".'),
+    voice: Optional[str] = typer.Option(
+        None, "-v", "--voice",
+        help="Voice slug for the frontmatter `voices:` default; also associates it if the voice exists on the server.",
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing persona file."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Print the generated persona instead of writing it."),
+) -> None:
+    """Author a persona file with the LLM (the same generator `voice clone` uses).
+
+    Web-searches the character for facts, then writes plugins/voice-persona/personas/<id>.md
+    following the bundled personas' structure: frontmatter, character bible,
+    "Rules for rewriting" that forbid dropping facts, before/after examples. The file is
+    validated through the plugin's own loader before it is written, and an existing
+    persona is never overwritten without --force.
+
+    Examples:
+
+      voxxy persona generate brian-griffin --character "Brian Griffin from Family Guy" --voice brian
+      voxxy persona generate stewie-griffin -c "Stewie Griffin, Family Guy" --dry-run
+    """
+    if not cl.PERSONA_ID_RE.match(persona):
+        typer.secho(f"invalid persona id '{persona}': use lowercase a-z0-9 and dashes", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=5)
+    if voice is not None and not cl.SLUG_RE.match(voice):
+        typer.secho(f"invalid voice slug '{voice}'", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=5)
+    plugin = _plugin_or_exit()
+    target = plugin.PERSONAS_DIR / f"{persona}.md"
+    if target.exists() and not force and not dry_run:
+        typer.secho(f"{target} already exists (pass --force to overwrite)", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=5)
+
+    llm = CloneLLM(load_config())
+    with console.status("[cyan]researching the character[/cyan]"):
+        facts = cl.web_search(character)
+    try:
+        with console.status("[cyan]writing the persona[/cyan]"):
+            markdown = cl.generate_persona(
+                llm, plugin, character=character, voice=voice, facts=facts,
+                display_name=character.split(",")[0].split(" from ")[0].strip() or character,
+            )
+    except cl.CloneError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if dry_run:
+        typer.echo(markdown)
+        return
+    try:
+        path = cl.write_persona(plugin, persona, markdown, force=force)
+    except cl.CloneError as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=5)
+    console.print(f"[green]wrote[/green] {path}")
+
+    if voice:
+        try:
+            VoxClient(load_config().default_url).set_voice_persona(voice, persona)
+            console.print(f"[green]associated[/green] voice '{voice}' -> {persona}")
+        except VoxNotFound:
+            console.print(f"[yellow]voice '{voice}' does not exist yet; the frontmatter default will apply once it does[/yellow]")
+        except VoxError as exc:
+            console.print(f"[yellow]could not associate with the voxxy server: {exc}[/yellow]")
