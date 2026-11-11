@@ -141,7 +141,8 @@ def main() -> None:
         status, _, body = call(url, "/healthz", timeout=10)
         worst = max(worst, time.monotonic() - started)
         probes += 1
-        check(status == 200, "healthz during synthesis", f"status={status}")
+        if status != 200:
+            check(False, "healthz during synthesis", f"status={status}")
         time.sleep(0.5)
     worker.join()
     check(result.get("status") == 200 and result["hdr"].get("x-vox-engine") == "voxcpm",

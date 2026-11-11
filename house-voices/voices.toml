@@ -1,0 +1,56 @@
+# House voices: four synthetic, non-real-person voices for clinical text-to-speech.
+#
+# Each reference clip is made with VoxCPM2 "Voice Design" (a text description of
+# the voice, no reference audio) and a fixed sampler seed, then registered like
+# any uploaded voice. Regenerate with `python3 build.py all` (README.md).
+#
+# The synthesis text for a voice is
+#     "(" + description + ")" + transcript_en + " " + transcript_es
+# and the registered `prompt_text` is `transcript_en + " " + transcript_es`.
+# The clip speaks one English and one Spanish sentence in the same voice, so the
+# registered voice (VoxCPM "continuation" cloning: reference clip + transcript)
+# keeps both languages' phonetics in its prompt.
+
+[recipe]
+model = "openbmb/VoxCPM2"
+# Weights file, by sha256 (a HuggingFace LFS blob name). Snapshots 32279eff... and
+# 7936080b... differ only in README.md; this file is identical in both.
+model_weights_sha256 = "f7f964cfa9da23653baec6e6f7750719977ad944ed9f95fe52fe3a620506891d"
+engine = "voxcpm"
+cfg = 2.0
+steps = 10
+tags = ["house", "clinical_ok", "synthetic"]
+transcript_en = "Hello, thank you for coming in today. Please take a moment to get comfortable, and tell me how you have been feeling."
+transcript_es = "Hola, gracias por venir hoy. Por favor, tómese un momento para ponerse cómodo y cuénteme cómo se ha sentido."
+
+[[voice]]
+name = "house-f1"
+display_name = "House F1"
+gender = "female"
+seed = 1
+description = "A warm, clear adult woman's voice in her thirties, calm and reassuring, steady moderate pace, neutral clinical register"
+sha256 = "1ce9d88533a292cee424972535faf9323bf29bafee59d06ca6c8ac487262aa53"
+
+[[voice]]
+name = "house-f2"
+display_name = "House F2"
+gender = "female"
+seed = 2
+description = "An older woman's voice in her sixties, calm and kind, low pitch, slow and unhurried, clear diction, neutral professional register"
+sha256 = "b8cfa5ba4daeca88719918720d98c8f91d0b6b146c7c7acb5d227615e2206c6c"
+
+[[voice]]
+name = "house-m1"
+display_name = "House M1"
+gender = "male"
+seed = 1
+description = "A warm, clear adult man's voice in his thirties, calm and reassuring, steady moderate pace, neutral clinical register"
+sha256 = "bfd3c7cda78aa75d893abf6c67d8793640dca44b112b1c61776ce4c65952aff3"
+
+[[voice]]
+name = "house-m2"
+display_name = "House M2"
+gender = "male"
+seed = 4
+description = "A deep, steady adult man's voice in his fifties, gentle and unhurried, clear diction, neutral professional register"
+sha256 = "2eea476d1108f66a27dbb59103c17c664cdb80223847bfb2b876220030642a49"

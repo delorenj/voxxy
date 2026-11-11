@@ -30,3 +30,6 @@ agents/hermes/*/runtime/
 !.claude/
 .claude/*
 !.claude/workflows/
+
+# house-voices/build.py and evaluate.py write generated clips here; voices.toml holds their sha256
+house-voices/out/
