@@ -237,6 +237,65 @@ curl https://vox.delo.sh/healthz
 #               {"name":"elevenlabs","available":true}]}
 ```
 
+### Per-request reference audio, fail-closed routing, voice source
+
+`POST /synthesize` (and `/synthesize-url`, `/sink/<key>/say`) take extra optional
+fields. None of them changes a request that does not send them.
+
+| Field | Meaning |
+|---|---|
+| `reference_audio_b64` | The speaker's own voice: base64 of a **mono integer-PCM WAV**, at most **2 MiB** decoded, **0.5-15 s**, 8-48 kHz. Overrides `voice` (the named voice is not even looked up). Held in memory only: never stored, never logged. |
+| `reference_sample_rate` | Optional. Must equal the WAV header's rate when sent. |
+| `prompt_text` | Exact transcript of the clip (at most 2000 chars). Switches VoxCPM to continuation cloning, the quality lever. Only with a clip. |
+| `require_reference` | `true` = never fall back to a stock voice: if no engine can clone the clip the request fails (503). Needs a clip. |
+| `engines` | Allowlist of engine names, e.g. `["voxcpm"]`. Nothing else is tried; if none can serve, 503. |
+| `language` | Language of `text` (`es`, `en-US`, ...). Engines that cannot speak it are skipped. VibeVoice is English/Chinese only; VoxCPM2 speaks 30 languages incl. Spanish. |
+| `seed` | Sampler seed (0 to 2^31-1). Same seed and inputs give the same audio on the same engine build. |
+
+```bash
+B64=$(base64 -w0 clip.wav)   # mono PCM WAV, <= 15 s
+curl -sS -D- -X POST https://vox.delo.sh/synthesize \
+  -H 'content-type: application/json' \
+  -d "{\"text\":\"Hola, buenos dias.\",\"language\":\"es\",
+       \"reference_audio_b64\":\"$B64\",\"prompt_text\":\"what the clip says\",
+       \"require_reference\":true,\"engines\":[\"voxcpm\"]}" -o out.wav
+# HTTP/2 200
+# x-vox-engine: voxcpm
+# x-vox-voice-source: reference
+```
+
+**`X-Vox-Voice-Source`** is on every successful synthesis (`/synthesize`,
+`/synthesize-url`; `voice_source` in the JSON bodies and the MCP `speak` result):
+
+- `reference`: the per-request clip was cloned.
+- `registered`: a registered voice's reference was cloned (a `/voices` entry).
+- `stock`: no clone. An engine's default voice, or ElevenLabs (which never clones).
+
+A reference request without `require_reference` may degrade to a stock engine
+(ElevenLabs); the clip and transcript are not sent to it, and the header says `stock`.
+VibeVoice never receives a per-request clip and is skipped for Spanish.
+
+**Errors** (a body of `{"detail": ...}`; request text and audio are never echoed):
+
+| Status | `X-Vox-Error` | When |
+|---|---|---|
+| 422 | (none) | Malformed or contradictory body (`require_reference` without a clip, ...) |
+| 422 | `invalid_reference` | The clip is unusable (not base64, not WAV, not mono PCM, too long, too big, rate mismatch). Raised before any engine is called, so `require_reference` with a bad clip is an error, never a fallback. |
+| 400 | | An engine rejected the input; no fallback was tried |
+| 404 | | Unknown `voice` |
+| 503 | `no_eligible_engine` | No configured engine satisfies `engines` / `language` / `require_reference` |
+| 503 | `engines_unavailable` | A restricted request (`require_reference` or `engines`) found every eligible engine down or failing |
+| 500 | | An unrestricted request where every engine failed (legacy) |
+
+Limits are `VOX_REQUEST_REF_MAX_BYTES` / `_MAX_SECONDS` / `_MIN_SECONDS`; which
+engines may clone a per-request clip is `VOX_REFERENCE_ENGINES` (default `voxcpm`);
+per-engine languages are `VOX_ENGINE_LANGUAGES` (e.g. `vibevoice=en,zh;voxcpm=*`).
+
+**House voices** (`house-f1`, `house-f2`, `house-m1`, `house-m2`) are synthetic,
+non-real-person voices tagged `house` and `clinical_ok`; see
+[`house-voices/README.md`](house-voices/README.md) for how they were made and how
+to regenerate them identically.
+
 ### CLI (`voxxy speak`)
 
 A one-shot synthesis verb for interactive use and SSH playback. Reads text

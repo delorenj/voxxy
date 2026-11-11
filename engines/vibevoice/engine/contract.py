@@ -63,6 +63,19 @@ class EngineSynthesizeRequest(BaseModel):
     cfg: float = Field(2.0, ge=1.0, le=5.0)
     steps: int = Field(10, ge=1, le=50)
 
+    # Additive and optional, so it is not a breaking change: pydantic ignores
+    # unknown fields, so an engine built before this field simply ignores it.
+    seed: Optional[int] = Field(
+        None,
+        ge=0,
+        le=2**31 - 1,
+        description=(
+            "Seed for the engine's sampler. Same seed, text, reference and "
+            "settings on the same engine build gives the same audio (how the "
+            "house voices are regenerated). None = unseeded."
+        ),
+    )
+
 
 class EngineSynthesizeResponse(BaseModel):
     """Body returned by a successful ``POST /v1/synthesize``."""

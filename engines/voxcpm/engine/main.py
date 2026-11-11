@@ -3,21 +3,33 @@
 Implements the ``/v1/synthesize`` + ``/healthz`` contract defined in
 ``engine.contract`` so ``voxxy-core`` can route synthesis requests here via
 ``RemoteEngineClient``.
+
+Concurrency: ``Synth.generate`` is blocking and GPU-bound. It runs in a worker
+thread (``asyncio.to_thread``), one call at a time behind ``_gpu_lock``, so the
+event loop stays free and ``/healthz`` answers while a long utterance renders.
+When generate ran on the loop, core's 2 s health probe timed out mid-synthesis,
+core marked the engine unhealthy for 10 s, and the next requests went to
+ElevenLabs in a stock voice.
+
+Logging: never the request body, the text, the transcript or the reference
+audio. Lengths and byte counts only.
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 import logging
 import tempfile
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
 import soundfile as sf
 import torch
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from engine.contract import (
@@ -32,6 +44,12 @@ logger = logging.getLogger(__name__)
 
 _synth: Synth | None = None
 
+# One generate on the GPU at a time. A threading.Lock (not asyncio.Lock) is held
+# inside the worker thread for exactly as long as the GPU work runs, so a
+# request cancelled while it waits can never release the lock under a running
+# generate. Waiters queue on executor threads, never on the event loop.
+_gpu_lock = threading.Lock()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[type-arg]
@@ -43,12 +61,21 @@ async def lifespan(app: FastAPI):  # type: ignore[type-arg]
     logger.info("voxcpm engine shutting down")
 
 
-app = FastAPI(title="vox-engine-voxcpm", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="vox-engine-voxcpm", version="0.2.0", lifespan=lifespan)
+
+
+def _model_loaded() -> bool:
+    return _synth is not None and _synth._model is not None
+
+
+def _error(status: int, code: str, message: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": {"code": code, "message": message}})
 
 
 @app.get("/healthz", response_model=EngineHealth)
 async def healthz() -> EngineHealth:
-    loaded = _synth is not None and _synth._model is not None
+    # Never touches the GPU lock or torch: it must answer while a synthesis runs.
+    loaded = _model_loaded()
     return EngineHealth(
         engine="voxcpm",
         ready=loaded,
@@ -64,78 +91,85 @@ async def healthz() -> EngineHealth:
     )
 
 
-@app.post("/v1/synthesize", response_model=EngineSynthesizeResponse)
-async def synthesize(req: EngineSynthesizeRequest) -> Any:
-    assert _synth is not None, "model not loaded"
+def _write_temp_wav(data: bytes) -> str:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        f.write(data)
+        return f.name
 
+
+def _check_readable(path: str) -> None:
+    """An unreadable clip is the caller's fault: 400, not a 500 from inside the model.
+
+    A 500 would make core mark this engine unhealthy and send everyone else's
+    requests to the fallback for the next 10 s.
+    """
+    try:
+        sf.info(path)
+    except Exception as exc:  # noqa: BLE001 - libsndfile raises several types
+        raise ValueError(f"reference audio is not readable audio ({type(exc).__name__})") from None
+
+
+def _synthesize_blocking(req: EngineSynthesizeRequest) -> EngineSynthesizeResponse:
+    """Decode the reference, generate under the GPU lock, encode. Worker thread only."""
+    assert _synth is not None
     ref_tmp: str | None = None
     prompt_tmp: str | None = None
-
     try:
         # Decode reference audio to a temp WAV file if provided.
         if req.reference_audio_b64:
             ref_bytes = base64.b64decode(req.reference_audio_b64)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                f.write(ref_bytes)
-                ref_tmp = f.name
+            ref_tmp = _write_temp_wav(ref_bytes)
+            _check_readable(ref_tmp)
+            # Transcript-guided cloning: VoxCPM wants prompt_wav_path +
+            # prompt_text together. Core sends one clip, so the same bytes are
+            # the prompt (the model card's "Ultimate Cloning" recipe). Without
+            # a transcript only the reference is used.
+            if req.prompt_text:
+                prompt_tmp = _write_temp_wav(ref_bytes)
 
-        # Decode prompt audio to a temp WAV file if transcript-guided cloning.
-        # VoxCPM supports prompt_wav_path + prompt_text together; if only
-        # prompt_text is set without audio we skip it to avoid a Synth error.
-        if req.prompt_text and req.reference_audio_b64:
-            # Re-use same bytes as prompt (caller doesn't send a separate clip
-            # today; the upstream orchestrator sends the reference as the prompt
-            # when a transcript is available).
-            prompt_bytes = base64.b64decode(req.reference_audio_b64)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-                f.write(prompt_bytes)
-                prompt_tmp = f.name
-
-        wav_np, sample_rate = _synth.generate(
-            text=req.text,
-            reference_wav_path=ref_tmp,
-            prompt_wav_path=prompt_tmp if req.prompt_text else None,
-            prompt_text=req.prompt_text,
-            cfg_value=req.cfg,
-            inference_timesteps=req.steps,
-            normalize=False,
-            denoise=False,
-        )
-
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=400,
-            content={"error": {"code": "INVALID_INPUT", "message": str(exc)}},
-        )
-    except torch.cuda.OutOfMemoryError:
-        logger.exception("CUDA OOM during synthesis")
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"code": "OOM", "message": "CUDA out of memory"}},
-        )
-    except Exception as exc:
-        logger.exception("Synthesis failed: %s", exc)
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"code": "MODEL_ERROR", "message": str(exc)}},
-        )
+        with _gpu_lock:
+            wav_np, sample_rate = _synth.generate(
+                text=req.text,
+                reference_wav_path=ref_tmp,
+                prompt_wav_path=prompt_tmp if req.prompt_text else None,
+                prompt_text=req.prompt_text if prompt_tmp else None,
+                cfg_value=req.cfg,
+                inference_timesteps=req.steps,
+                normalize=False,
+                denoise=False,
+                seed=req.seed,
+            )
     finally:
         # Always clean up temp files regardless of outcome.
         for tmp in (ref_tmp, prompt_tmp):
             if tmp:
                 Path(tmp).unlink(missing_ok=True)
 
-    # Encode WAV to base64.
     buf = io.BytesIO()
     sf.write(buf, wav_np, sample_rate, format="WAV", subtype="PCM_16")
     wav_bytes = buf.getvalue()
-    wav_b64 = base64.b64encode(wav_bytes).decode("ascii")
-    duration_s = len(wav_np) / sample_rate
-
     return EngineSynthesizeResponse(
-        wav_b64=wav_b64,
+        wav_b64=base64.b64encode(wav_bytes).decode("ascii"),
         sample_rate=sample_rate,
         engine="voxcpm",
-        duration_s=duration_s,
+        duration_s=len(wav_np) / sample_rate,
         bytes=len(wav_bytes),
     )
+
+
+@app.post("/v1/synthesize", response_model=EngineSynthesizeResponse)
+async def synthesize(req: EngineSynthesizeRequest) -> Any:
+    if not _model_loaded():
+        return _error(503, "UNAVAILABLE", "model not loaded")
+    try:
+        return await asyncio.to_thread(_synthesize_blocking, req)
+    except ValueError as exc:
+        return _error(400, "INVALID_INPUT", str(exc)[:300])
+    except torch.cuda.OutOfMemoryError:
+        logger.exception("CUDA OOM during synthesis (text_len=%d)", len(req.text))
+        return _error(500, "OOM", "CUDA out of memory")
+    except Exception as exc:  # noqa: BLE001
+        # The traceback carries the exception, never the request: no text,
+        # transcript or audio is part of any message raised on this path.
+        logger.exception("synthesis failed (%s, text_len=%d)", type(exc).__name__, len(req.text))
+        return _error(500, "MODEL_ERROR", f"{type(exc).__name__}: {str(exc)[:300]}")

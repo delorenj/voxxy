@@ -8,6 +8,12 @@
 - Voice profile CRUD at /voices
 - Health check at /healthz
 
+Every successful synthesis answers ``X-Vox-Engine`` (which engine served) and
+``X-Vox-Voice-Source`` (``reference`` | ``registered`` | ``stock``: whose voice
+it is). A request may carry its own reference clip (``reference_audio_b64``),
+pin engines (``engines``), forbid the stock fallback (``require_reference``)
+and name its ``language``; see SynthesizeRequest and app/engines.py.
+
 Environment:
   VOX_DATABASE_URL     postgres DSN (required)
   VOX_VOICES_DIR       directory holding voice WAVs (default: /data/voices)
@@ -16,7 +22,11 @@ Environment:
   VOX_ENGINES          comma-separated name=url pairs for remote engine sidecars
   VOX_API_KEY          optional shared key protecting HTTP/MCP data-plane routes
   VOX_DEFAULT_SINK     default sink name for the speak_sink MCP tool (optional)
-  VOX_REF_AUDIO_MAX_SECONDS  max reference audio length (default 30)
+  VOX_REF_AUDIO_MAX_SECONDS  max reference audio length kept on upload (default 30)
+  VOX_REQUEST_REF_MAX_BYTES / _MAX_SECONDS / _MIN_SECONDS  per-request clip
+                       limits (default 2 MiB / 15 s / 0.5 s; app/reference.py)
+  VOX_REFERENCE_ENGINES  engines allowed to clone a per-request clip (default voxcpm)
+  VOX_ENGINE_LANGUAGES   per-engine language override, e.g. "vibevoice=en,zh;voxcpm=*"
   ELEVENLABS_API_KEY   enables the ElevenLabs fallback engine (optional)
   ELEVENLABS_DEFAULT_VOICE  default ElevenLabs voice id (default: Adam)
 """
@@ -31,19 +41,30 @@ import shutil
 import tempfile
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import soundfile as sf
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastmcp import FastMCP
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import audio as audio_codec
 from app.auth import ApiKeyAuthMiddleware
 from app import cache as audio_cache
 from app import sink as sink_relay
-from app.engines import ElevenLabsEngine, EngineOrchestrator, PermanentEngineError, RemoteEngineClient, SynthResult
+from app.engines import (
+    ElevenLabsEngine,
+    EngineOrchestrator,
+    EnginesExhaustedError,
+    NoEligibleEngineError,
+    PermanentEngineError,
+    RemoteEngineClient,
+    SynthResult,
+    normalize_language,
+)
+from app.reference import ReferenceAudio, ReferenceAudioError, decode_reference
 from app.voices import PERSONA_NONE, PERSONA_RE, VOICES_DIR, Voice, VoiceRepo
 
 logging.basicConfig(
@@ -97,6 +118,93 @@ class SynthesizeRequest(BaseModel):
     normalize: bool = False
     denoise: bool = False
 
+    # --- per-request reference (overrides `voice` when present) ---
+    reference_audio_b64: Optional[str] = Field(
+        None,
+        description=(
+            "The speaker's own voice: base64 of a mono integer-PCM WAV, at most "
+            "2 MiB decoded and 15 s. Overrides `voice` (which is then not looked "
+            "up). Held in memory only, never stored or logged."
+        ),
+    )
+    reference_sample_rate: Optional[int] = Field(
+        None,
+        ge=8_000,
+        le=48_000,
+        description="Optional; must equal the WAV header's rate when given.",
+    )
+    prompt_text: Optional[str] = Field(
+        None,
+        max_length=2000,
+        description=(
+            "Exact transcript of the reference clip (switches VoxCPM to "
+            "continuation cloning). Only with reference_audio_b64."
+        ),
+    )
+    require_reference: bool = Field(
+        False,
+        description=(
+            "Fail (503) instead of falling back to a stock voice when no "
+            "reference engine can serve the clip. Needs reference_audio_b64."
+        ),
+    )
+    engines: Optional[list[str]] = Field(
+        None,
+        min_length=1,
+        max_length=8,
+        description=(
+            "Allowlist of engine names (e.g. [\"voxcpm\"]). Nothing else is "
+            "tried; if none can serve, 503 instead of a fallback."
+        ),
+    )
+    language: Optional[str] = Field(
+        None,
+        description=(
+            "Language of `text` (BCP-47, e.g. \"es\", \"en-US\"). Engines that "
+            "cannot speak it are skipped (VibeVoice: en/zh only)."
+        ),
+    )
+    seed: Optional[int] = Field(
+        None,
+        ge=0,
+        le=2**31 - 1,
+        description="Sampler seed; same seed + inputs = same audio on the same engine build.",
+    )
+
+    @field_validator("prompt_text")
+    @classmethod
+    def _blank_prompt_is_none(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        return v or None
+
+    @field_validator("engines")
+    @classmethod
+    def _engine_names(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return None
+        names = [n.strip() for n in v]
+        if any(not n or len(n) > 64 for n in names):
+            raise ValueError("engine names must be 1-64 characters")
+        return names
+
+    @field_validator("language")
+    @classmethod
+    def _language_code(cls, v: Optional[str]) -> Optional[str]:
+        return None if v is None else normalize_language(v)
+
+    @model_validator(mode="after")
+    def _reference_fields_need_a_reference(self) -> "SynthesizeRequest":
+        if self.reference_audio_b64 is None:
+            if self.require_reference:
+                raise ValueError("require_reference is true but no reference_audio_b64 was sent")
+            if self.prompt_text is not None:
+                raise ValueError("prompt_text is only accepted together with reference_audio_b64")
+            if self.reference_sample_rate is not None:
+                raise ValueError("reference_sample_rate is only accepted together with reference_audio_b64")
+        return self
+
 
 class SynthesizeUrlResponse(BaseModel):
     """Response shape shared by POST /synthesize-url and the speak_url MCP tool.
@@ -110,6 +218,7 @@ class SynthesizeUrlResponse(BaseModel):
     duration_s: Optional[float] = None
     bytes: int
     format: str = "ogg_opus"
+    voice_source: Optional[str] = None  # reference | registered | stock
 
 
 class SinkPlayRequest(BaseModel):
@@ -220,9 +329,19 @@ async def _synthesize_wav(
     voice_name: Optional[str],
     cfg: float,
     steps: int,
+    reference: Optional[ReferenceAudio] = None,
+    require_reference: bool = False,
+    engines: Optional[list[str]] = None,
+    language: Optional[str] = None,
+    seed: Optional[int] = None,
 ) -> SynthResult:
     assert _engine is not None
-    resolver, prompt_text, eleven_voice_id, preferred = await _resolve_voice(voice_name)
+    if reference is not None:
+        # The caller's own clip overrides the named voice entirely: the voice
+        # is not even looked up, so an unknown name cannot 404 a clone request.
+        resolver = prompt_text = eleven_voice_id = preferred = None
+    else:
+        resolver, prompt_text, eleven_voice_id, preferred = await _resolve_voice(voice_name)
     return await _engine.generate(
         text=text,
         reference_resolver=resolver,
@@ -231,7 +350,72 @@ async def _synthesize_wav(
         cfg=cfg,
         steps=steps,
         preferred=preferred,
+        reference=reference,
+        require_reference=require_reference,
+        allowed_engines=engines,
+        language=language,
+        seed=seed,
     )
+
+
+def _request_synth_kwargs(req: SynthesizeRequest) -> dict[str, Any]:
+    """Map a request body onto ``_synthesize_wav`` kwargs, validating its clip.
+
+    An unusable clip is a 422 raised here, before any engine is called, so
+    ``require_reference`` with a bad clip is an error and never a fallback.
+    """
+    reference: Optional[ReferenceAudio] = None
+    if req.reference_audio_b64 is not None:
+        try:
+            reference = decode_reference(
+                req.reference_audio_b64,
+                declared_sample_rate=req.reference_sample_rate,
+                prompt_text=req.prompt_text,
+            )
+        except ReferenceAudioError as exc:
+            raise HTTPException(
+                422,
+                detail=[{
+                    "type": "invalid_reference",
+                    "loc": ["body", "reference_audio_b64"],
+                    "msg": str(exc),
+                }],
+                headers={"X-Vox-Error": "invalid_reference"},
+            ) from None
+    return {
+        "text": req.text,
+        "voice_name": req.voice,
+        "cfg": req.cfg,
+        "steps": req.steps,
+        "reference": reference,
+        "require_reference": req.require_reference,
+        "engines": req.engines,
+        "language": req.language,
+        "seed": req.seed,
+    }
+
+
+def _http_error(exc: Exception, *, what: str) -> HTTPException:
+    """Translate a synthesis failure into the HTTP answer.
+
+    - engine 4xx: 400 (the request is wrong; no fallback was tried)
+    - no engine fits the request's constraints: 503 ``no_eligible_engine``
+    - a restricted request (``require_reference`` / ``engines``) whose
+      engines were all down or failing: 503 ``engines_unavailable``
+    - anything else: 500, as before
+    """
+    if isinstance(exc, PermanentEngineError):
+        return HTTPException(400, str(exc))
+    if isinstance(exc, NoEligibleEngineError):
+        return HTTPException(503, str(exc), headers={"X-Vox-Error": "no_eligible_engine"})
+    if isinstance(exc, EnginesExhaustedError) and exc.restricted:
+        return HTTPException(503, str(exc), headers={"X-Vox-Error": "engines_unavailable"})
+    logger.exception("%s failed", what)
+    return HTTPException(500, f"synthesis failed: {exc}")
+
+
+def _synth_headers(result: SynthResult) -> dict[str, str]:
+    return {"X-Vox-Engine": result.engine, "X-Vox-Voice-Source": result.voice_source}
 
 
 def _duration_from_wav(wav_bytes: bytes) -> Optional[float]:
@@ -245,10 +429,15 @@ def _duration_from_wav(wav_bytes: bytes) -> Optional[float]:
 async def _synthesize_and_cache(
     *, text: str, voice_name: Optional[str], cfg: float, steps: int,
     request: Optional[Request] = None,
+    **routing: Any,
 ) -> SynthesizeUrlResponse:
-    """Run the fallback chain, transcode to OGG/Opus, cache, return a URL."""
+    """Run the fallback chain, transcode to OGG/Opus, cache, return a URL.
+
+    ``routing`` carries the optional per-request kwargs of ``_synthesize_wav``
+    (reference, require_reference, engines, language, seed).
+    """
     result = await _synthesize_wav(
-        text=text, voice_name=voice_name, cfg=cfg, steps=steps,
+        text=text, voice_name=voice_name, cfg=cfg, steps=steps, **routing,
     )
     # Transcode off the event loop; ffmpeg blocks.
     ogg_bytes = await asyncio.to_thread(
@@ -271,6 +460,7 @@ async def _synthesize_and_cache(
         engine=result.engine,
         duration_s=duration,
         bytes=len(ogg_bytes),
+        voice_source=result.voice_source,
     )
 
 
@@ -318,6 +508,21 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="vox-tts", version="0.2.0", lifespan=lifespan)
 app.add_middleware(ApiKeyAuthMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_without_input(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """422 with each error's type, location and message, but not its input.
+
+    FastAPI's default 422 echoes the offending input. On /synthesize that input
+    can be caption text or a 2 MiB voice clip, which must not be bounced back
+    into proxies, client logs or error trackers.
+    """
+    errors = [
+        {"type": err.get("type"), "loc": list(err.get("loc", ())), "msg": err.get("msg")}
+        for err in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": errors})
 
 
 @app.get("/healthz")
@@ -400,21 +605,23 @@ async def install_sh(request: Request) -> Response:
 
 @app.post("/synthesize", responses={200: {"content": {"audio/wav": {}}}})
 async def synthesize(req: SynthesizeRequest) -> Response:
-    """Raw WAV synthesis. Runs the engine chain, returns the winning engine's bytes."""
+    """Raw WAV synthesis. Runs the engine chain, returns the winning engine's bytes.
+
+    Headers on success: ``X-Vox-Engine`` and ``X-Vox-Voice-Source``
+    (reference | registered | stock).
+    """
     assert _engine is not None and _repo is not None
+    kwargs = _request_synth_kwargs(req)
     try:
-        result = await _synthesize_wav(
-            text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
-        )
-    except PermanentEngineError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        result = await _synthesize_wav(**kwargs)
+    except HTTPException:
+        raise
     except Exception as exc:
-        logger.exception("synthesize failed")
-        raise HTTPException(500, f"synthesis failed: {exc}") from exc
+        raise _http_error(exc, what="synthesize") from exc
     return Response(
         content=result.wav_bytes,
         media_type="audio/wav",
-        headers={"X-Vox-Engine": result.engine},
+        headers=_synth_headers(result),
     )
 
 
@@ -425,17 +632,16 @@ async def synthesize_url(req: SynthesizeRequest, request: Request, response: Res
     Consumers like Telegram's sendVoice fetch the URL directly from our
     /audio/<id>.ogg route. The cache entry expires per ``VOX_AUDIO_TTL_SECONDS``.
     """
+    kwargs = _request_synth_kwargs(req)
     try:
-        resp = await _synthesize_and_cache(
-            text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
-            request=request,
-        )
-    except PermanentEngineError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        resp = await _synthesize_and_cache(**kwargs, request=request)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
-        logger.exception("synthesize_url failed")
-        raise HTTPException(500, f"synthesis failed: {exc}") from exc
+        raise _http_error(exc, what="synthesize_url") from exc
     response.headers["X-Vox-Engine"] = resp.engine
+    if resp.voice_source:
+        response.headers["X-Vox-Voice-Source"] = resp.voice_source
     return resp
 
 
@@ -498,16 +704,13 @@ async def sink_say(key: str, req: SynthesizeRequest, request: Request) -> SinkPl
     usable ``audio_url`` -- the caller can fall back to playing it itself.
     """
     _validated_key(key)
+    kwargs = _request_synth_kwargs(req)
     try:
-        resp = await _synthesize_and_cache(
-            text=req.text, voice_name=req.voice, cfg=req.cfg, steps=req.steps,
-            request=request,
-        )
-    except PermanentEngineError as exc:
-        raise HTTPException(400, str(exc)) from exc
+        resp = await _synthesize_and_cache(**kwargs, request=request)
+    except HTTPException:
+        raise
     except Exception as exc:  # noqa: BLE001
-        logger.exception("sink_say failed")
-        raise HTTPException(500, f"synthesis failed: {exc}") from exc
+        raise _http_error(exc, what="sink_say") from exc
 
     delivered = _sinks.publish(key, {
         "audio_url": resp.audio_url,
@@ -680,6 +883,7 @@ async def speak(
         "audio_wav_b64": base64.b64encode(result.wav_bytes).decode("ascii"),
         "voice": voice,
         "engine": result.engine,
+        "voice_source": result.voice_source,
         "bytes": len(result.wav_bytes),
     }
 

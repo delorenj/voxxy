@@ -106,8 +106,14 @@ class Synth:
         normalize: bool = False,
         denoise: bool = False,
         max_len: int = DEFAULT_MAX_LEN,
+        seed: Optional[int] = None,
     ) -> tuple[np.ndarray, int]:
-        """Generate a waveform for ``text``. Returns (wav, sample_rate)."""
+        """Generate a waveform for ``text``. Returns (wav, sample_rate).
+
+        Blocking and GPU-bound: callers run it in a worker thread, one at a
+        time (engine.main holds the GPU lock around it). ``seed`` makes the
+        sampler reproducible for this call only (see :meth:`_seeded`).
+        """
         assert self._model is not None, "call load() first"
         if not text or not text.strip():
             raise ValueError("text must be a non-empty string")
@@ -138,7 +144,10 @@ class Synth:
             torch.cuda.reset_peak_memory_stats()
 
         try:
-            wav = self._model.generate(**kwargs)
+            if seed is None:
+                wav = self._model.generate(**kwargs)
+            else:
+                wav = self._seeded(seed, kwargs)
         finally:
             # Release transient tensors + temp files regardless of outcome.
             gc.collect()
@@ -156,3 +165,17 @@ class Synth:
             logger.info("synthesis peak VRAM %.2f GB (text_len=%d)", peak_gb, len(text))
 
         return wav, self.sample_rate
+
+    def _seeded(self, seed: int, kwargs: dict) -> np.ndarray:
+        """Run one generate with every torch RNG seeded, then put the RNGs back.
+
+        All of VoxCPM2's sampling noise is ``torch.randn``/``torch.rand`` (CPU
+        and CUDA), so seeding torch makes a call reproducible: same seed, text,
+        reference and settings on the same model snapshot and GPU stack gives
+        the same waveform. ``fork_rng`` restores the global RNG state afterwards
+        so a seeded call does not make later unseeded calls predictable.
+        """
+        devices = list(range(torch.cuda.device_count())) if torch.cuda.is_available() else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(seed)  # seeds the CPU and every CUDA device
+            return self._model.generate(**kwargs)

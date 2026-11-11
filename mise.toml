@@ -119,6 +119,10 @@ echo "--- engine-contract live check ---"
 bash scripts/verify-engine-contract.sh --live
 '''
 
+[tasks."smoke:voice-source"]
+description = "Live check of per-request references, fail-closed routing, X-Vox-Voice-Source and healthz during a long synthesis."
+run = "python3 scripts/smoke_voice_source.py"
+
 # ---------------------------------------------------------------------------
 # Raw-compose holdouts — build ops and postgres migrations
 # ---------------------------------------------------------------------------

@@ -41,6 +41,23 @@ handles longer reference clips (up to 30 s) without quality regression.
   accurate transcript of the reference audio for better prosody matching. Only set this
   when you actually have a matching transcript; wrong transcripts degrade output.
 
+## Concurrency and determinism
+
+- **Off the event loop, one at a time.** `generate` is blocking and GPU-bound, so it runs
+  in a worker thread (`asyncio.to_thread`) behind a `threading.Lock` (`_gpu_lock`). The
+  loop stays free and `/healthz` answers during a long render. Before this, a long
+  utterance made core's 2 s health probe time out, core marked the engine unhealthy for
+  10 s, and requests silently fell back to ElevenLabs in a stock voice. `/healthz` never
+  touches the lock or torch. Requests queue on executor threads, not on the loop.
+- **`seed`** (optional, 0 to 2^31-1) runs `generate` inside `torch.random.fork_rng` with
+  `torch.manual_seed(seed)`: the same text, reference, `cfg`, `steps` and seed give the
+  same audio on the same build and GPU, and other requests' sampling is unaffected. This
+  is how the house voices are regenerated identically (`house-voices/`).
+- **Errors:** an unreadable reference is `400 INVALID_INPUT` (not a 500: a 500 would make
+  core mark the engine unhealthy for 10 s); an unloaded model is `503 UNAVAILABLE`;
+  CUDA OOM is `500 OOM`; anything else is `500 MODEL_ERROR`. Logs carry `text_len` only,
+  never text, transcript or audio.
+
 ## Known limits
 
 - Single-speaker only. Multi-speaker dialog is not supported.
