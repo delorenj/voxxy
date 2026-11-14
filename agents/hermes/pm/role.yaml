@@ -28,7 +28,7 @@ ticket_provider:
   board_url: "https://plane.delo.sh/33god/projects/b757648f-0067-482c-84b5-947158a7af3f/issues/"
   workspace: ""
   project: ""     # Plane project uuid (set by 42-ticket-provider.sh)
-  in_review: "E2E Testing & QA"
+  in_review: "In Progress"   # Krebs lifecycle v2: no review lane; review = In Progress + lifecycle:review
   completed: "Done"
   backlog: "Backlog"
   unstarted: "Todo"
