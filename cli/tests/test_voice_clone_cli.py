@@ -278,6 +278,16 @@ def clone_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     st.llm.replies = [json.dumps(BRIAN)]
     monkeypatch.setattr(cl, "web_search", lambda q, n=5, **k: st.search_calls.append(q) or [{"title": "Brian", "snippet": "dog", "url": "http://w"}])
     monkeypatch.setattr(vc.cl, "find_videos", lambda ident, llm, **k: list(st.videos))
+    # who speaks each window (unattended runs): by default every window is the target; a test sets st.not_target
+    st.not_target, st.attributions = set(), []
+
+    def fake_attribute(ident, video, texts, llm):
+        st.attributions.append((video.id, list(texts)))
+        if st.not_target is None:
+            return None
+        return {i for i, t in enumerate(texts) if t not in st.not_target}
+
+    monkeypatch.setattr(vc.cl, "attribute_windows", fake_attribute)
 
     def fake_download(video, outdir, *, max_minutes=12, identity=None, **kw):
         st.downloads.append((video.id, max_minutes))
@@ -655,3 +665,52 @@ class TestPersonaGenerate:
     def test_unknown_voice_is_not_fatal(self) -> None:
         res = runner.invoke(app, ["persona", "generate", "brian-griffin", "-c", "Brian", "--voice", "ghost"])
         assert res.exit_code == 0 and FakeVox.persona_puts == []
+
+
+class TestTargetAttribution:
+    """Unattended, a window counts only when its words say the target is speaking (the talk-show host is not)."""
+
+    def test_host_windows_are_dropped_and_the_target_window_wins(self, clone_env) -> None:
+        clone_env.markers_by_video["vid1"] = [marker(1.0, 12.0, 0.9, text="I've been a fan of yours for years"),
+                                              marker(30.0, 41.0, 0.8, text="I never liked my voice")]
+        clone_env.not_target = {"I've been a fan of yours for years"}
+        res = runner.invoke(app, ["voice", "clone", "dog", "--yes", "--pick", "1", "--no-persona"])
+        assert res.exit_code == 0, res.output
+        assert clone_env.prepared[0][1:] == (30.0, 41.0)
+        wd = cl.workdir_for("brian-griffin")
+        listed = [c["text"] for c in json.loads((wd / "markers.json").read_text())["candidates"]]
+        assert listed == ["I never liked my voice"]  # --pick N indexes exactly what markers.json lists
+
+    def test_a_video_where_only_the_host_talks_falls_through(self, clone_env) -> None:
+        clone_env.markers_by_video["vid1"] = [marker(1.0, 12.0, 0.9, text="welcome to the show")]
+        clone_env.not_target = {"welcome to the show"}
+        res = runner.invoke(app, ["voice", "clone", "dog", "--yes", "--pick", "1", "--no-persona"])
+        assert res.exit_code == 0, res.output
+        assert [d[0] for d in clone_env.downloads] == ["vid1", "vid2"]
+        assert clone_env.prepared[0][1:] == (3.0, 14.0)
+
+    def test_llm_down_keeps_the_acoustic_ranking(self, clone_env) -> None:
+        clone_env.not_target = None
+        res = runner.invoke(app, ["voice", "clone", "dog", "--yes", "--pick", "1", "--no-persona"])
+        assert res.exit_code == 0, res.output
+        assert clone_env.prepared[0][1:] == (12.64, 24.94)
+        assert "keeping the acoustic ranking" in res.output.replace("\n", " ")
+
+
+class TestAttributeWindows:
+    def _video(self):
+        return cl.Video("v", "How Morgan Freeman Developed His Voice | Late Night", "https://youtu.be/v", 378, "Conan")
+
+    def _ident(self):
+        return cl.Identity(display_name="Morgan Freeman", slug="morgan-freeman", query="Morgan Freeman")
+
+    def test_parses_one_based_numbers_and_ignores_junk(self) -> None:
+        llm = StubLLM(['{"target": [2, "3", 9, "x"]}'])
+        got = cl.attribute_windows(self._ident(), self._video(), ["fan of yours", "I never liked", "my voice"], llm)
+        assert got == {1, 2}
+        user = llm.calls[0][1]["content"]
+        assert "Target: Morgan Freeman" in user and 'untrusted="true"' in user and "1. fan of yours" in user
+
+    def test_llm_error_or_off_schema_is_none(self) -> None:
+        assert cl.attribute_windows(self._ident(), self._video(), ["a"], StubLLM([LLMError("quota")])) is None
+        assert cl.attribute_windows(self._ident(), self._video(), ["a"], StubLLM(['{"ranked": [1]}'])) is None

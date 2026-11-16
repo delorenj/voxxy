@@ -25,6 +25,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from typing import Any, Optional
 
 import httpx
@@ -32,6 +33,8 @@ import httpx
 from voxxy.config import DEFAULT_CLONE_MODEL, Config, load_config
 
 DEFAULT_LLM_TIMEOUT = 40.0
+RETRY_STATUSES = (429, 502, 503)
+RETRY_WAITS = (1.0, 3.0)  # seconds before the 2nd and 3rd attempt
 
 
 class LLMError(Exception):
@@ -143,17 +146,23 @@ class ChatLLM:
             "stream": False,
         }
         err = self.error_cls
-        try:
-            with httpx.Client(timeout=timeout or self.timeout, transport=self._transport) as http:
-                resp = http.post(
-                    f"{self.base_url}/chat/completions",
-                    json=payload,
-                    headers={"Authorization": f"Bearer {key}"},
-                )
-        except httpx.TimeoutException as exc:
-            raise err(f"{self.label} LLM timed out ({exc})") from exc
-        except httpx.HTTPError as exc:
-            raise err(f"{self.label} LLM unreachable at {self.base_url}: {exc}") from exc
+        # A gateway auto router answers 429/502/503 when one member refuses and says the retry goes to another member,
+        # so a refused call is retried (twice, briefly) before every caller falls back to its degraded path.
+        for attempt in range(len(RETRY_WAITS) + 1):
+            try:
+                with httpx.Client(timeout=timeout or self.timeout, transport=self._transport) as http:
+                    resp = http.post(
+                        f"{self.base_url}/chat/completions",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {key}"},
+                    )
+            except httpx.TimeoutException as exc:
+                raise err(f"{self.label} LLM timed out ({exc})") from exc
+            except httpx.HTTPError as exc:
+                raise err(f"{self.label} LLM unreachable at {self.base_url}: {exc}") from exc
+            if resp.status_code not in RETRY_STATUSES or attempt == len(RETRY_WAITS):
+                break
+            time.sleep(RETRY_WAITS[attempt])
         if resp.status_code >= 400:
             raise err(f"{self.label} LLM returned {resp.status_code}: {resp.text[:200]}")
         try:

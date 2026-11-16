@@ -330,10 +330,33 @@ def _confirm_identity(
         raise typer.Exit(code=1)
 
 
+def _attributed(identity: cl.Identity, video: cl.Video, analysis: refclip.Analysis, llm) -> list[refclip.Marker]:
+    """The ranked windows the target speaks, judged from their words (unattended runs: nobody listens).
+
+    The pool is the top PICK_POOL passing windows plus the next ones, so dropping the host's lines still leaves up to
+    PICK_POOL of the target's. When the LLM cannot answer, the acoustic ranking stands (with a note): a clone attempt
+    beats none, and the ECAPA gate and _speaker_risk still apply.
+    """
+    pool = analysis.top(PICK_POOL * 3)
+    if not pool:
+        return []
+    keep = cl.attribute_windows(identity, video, [m.text for m in pool], llm)
+    if keep is None:
+        console.print("  [yellow]could not ask who speaks each window; keeping the acoustic ranking[/yellow]")
+        return pool[:PICK_POOL]
+    kept = [m for i, m in enumerate(pool) if i in keep][:PICK_POOL]
+    for m in kept:
+        m.metrics["target_attributed"] = 1.0
+    console.print(f"  [dim]{len(kept)} of {len(pool)} clean windows are {escape(identity.display_name)} speaking[/dim]")
+    return kept
+
+
 def _collect_attempts(
     identity: cl.Identity, videos: list[cl.Video], workdir: Path, *, max_videos: int, max_minutes: float,
-    min_seconds: float, max_seconds: float,
+    min_seconds: float, max_seconds: float, llm=None,
 ) -> list[Attempt]:
+    """Download and rank videos until one has a strong window. With ``llm`` (unattended), a window only counts when its
+    words say the target is the one speaking, and markers.json lists exactly those windows (so --pick N indexes them)."""
     attempts: list[Attempt] = []
     for k, video in enumerate(videos[:max_videos], 1):
         console.print(f"[bold]video {k}/{min(max_videos, len(videos))}[/bold] {escape(video.title)} "
@@ -351,8 +374,12 @@ def _collect_attempts(
             console.print(f"  [yellow]{escape(str(exc))}; trying the next video[/yellow]")
             wav.unlink(missing_ok=True)
             continue
-        top = analysis.top(PICK_POOL)
-        write_markers(adir / "markers.json", analysis, refclip.select_top(analysis.markers, PICK_POOL))
+        if llm is not None:
+            top = _attributed(identity, video, analysis, llm)
+            write_markers(adir / "markers.json", analysis, top)
+        else:
+            top = analysis.top(PICK_POOL)
+            write_markers(adir / "markers.json", analysis, refclip.select_top(analysis.markers, PICK_POOL))
         best = f"best {top[0].score:.2f} @ {top[0].start:.1f}-{top[0].end:.1f}s" if top else "no clean window"
         console.print(f"  [dim]{analysis.duration:.0f}s audio, {len(analysis.markers)} windows, {best}[/dim]")
         wanted = min(video.duration, max_minutes * 60)
@@ -550,7 +577,7 @@ def clone(
     # 3-5. download, analyse, fall through on weak results
     attempts = _collect_attempts(
         identity, videos, workdir, max_videos=max_videos, max_minutes=max_minutes,
-        min_seconds=min_seconds, max_seconds=max_seconds,
+        min_seconds=min_seconds, max_seconds=max_seconds, llm=None if interactive else llm,
     )
     usable = [a for a in attempts if a.top]
     if not usable:

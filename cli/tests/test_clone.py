@@ -212,6 +212,25 @@ class TestCloneConfig:
             llm([{"role": "user", "content": "x"}])
         assert "500" in (llm.last_error or "")
 
+    def test_a_refused_router_member_is_retried(self, monkeypatch) -> None:
+        import voxxy.llm as llm_mod
+        monkeypatch.setattr(llm_mod.time, "sleep", lambda s: None)
+        replies = [httpx.Response(429, text="member refused; a retry is routed to another member"),
+                   httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})]
+        llm = CloneLLM(Config(), transport=httpx.MockTransport(lambda r: replies.pop(0)))
+        llm._api_key = "k"
+        assert llm([{"role": "user", "content": "x"}]) == "ok" and not replies
+
+    def test_retries_are_bounded(self, monkeypatch) -> None:
+        import voxxy.llm as llm_mod
+        waits = []
+        monkeypatch.setattr(llm_mod.time, "sleep", waits.append)
+        llm = CloneLLM(Config(), transport=httpx.MockTransport(lambda r: httpx.Response(503, text="busy")))
+        llm._api_key = "k"
+        with pytest.raises(LLMError, match="clone LLM returned 503"):
+            llm([{"role": "user", "content": "x"}])
+        assert waits == list(llm_mod.RETRY_WAITS)
+
 
 # ---------------------------------------------------------------------------
 # identity
