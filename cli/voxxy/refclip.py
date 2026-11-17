@@ -236,6 +236,14 @@ class Analysis:
     feats: Optional[FrameFeatures] = field(default=None, repr=False)
     voices: Any = field(default=None, repr=False)   # speakergate.VoiceMap, or None when the ECAPA gate could not run
     voice_gate_note: str = ""                        # why it did not run
+    audio_path: Optional[str] = None                 # isolated vocal wav when Demucs isolation ran
+    vocals_isolated: bool = False
+    isolation_note: str = ""
+
+    @property
+    def export_source(self) -> Path:
+        """Audio file to cut reference clips from (the isolated vocal stem when available)."""
+        return Path(self.audio_path or self.path)
 
     def top(self, k: int = 5, *, include_rejected: bool = False) -> list[Marker]:
         return select_top(self.markers, k, include_rejected=include_rejected)
@@ -882,6 +890,63 @@ def apply_voice_gate(markers: list[Marker], voices) -> None:
     markers.sort(key=lambda m: (not m.ok, -m.score))
 
 
+def _analyze_pass(
+    audio_file: Path,
+    *,
+    source_path: Path,
+    min_seconds: float,
+    max_seconds: float,
+    words: Optional[list[Word]],
+    use_cache: bool,
+    verify: bool,
+    verify_top: int,
+    voice_gate: bool,
+    vocals_isolated: bool,
+    progress: Optional[Callable[[str], None]],
+) -> Analysis:
+    say = progress or (lambda _m: None)
+    say("decoding isolated vocals" if vocals_isolated else "decoding audio")
+    audio = decode_audio(audio_file)
+    duration = len(audio) / SAMPLE_RATE
+    if words is None:
+        say(f"transcribing {duration:.0f}s with {whisper_model_name()}")
+        words = transcribe_file(audio_file, audio, use_cache=use_cache)
+    say("analysing pauses and speakers")
+    feats = frame_features(audio)
+    pauses, level, below = detect_pauses(feats.db, duration)
+    spk = speaker_map(feats, speech_thr_db=level - below)
+    markers = score_windows(
+        audio, words, pauses, feats, speakers=spk, speech_thr_db=level - below,
+        min_seconds=min_seconds, max_seconds=max_seconds,
+    )
+    analysis = Analysis(
+        path=str(source_path),
+        duration=duration,
+        words=words,
+        pauses=pauses,
+        speech_level_db=level,
+        pause_below_db=below,
+        speakers=spk,
+        markers=markers,
+        audio=audio,
+        feats=feats,
+        audio_path=str(audio_file) if vocals_isolated else None,
+        vocals_isolated=vocals_isolated,
+    )
+    if voice_gate and markers and os.environ.get("VOXXY_VOICE_GATE", "").lower() not in ("0", "off", "false", "no"):
+        from voxxy import speakergate as sg
+
+        try:
+            analysis.voices = sg.embed_source(audio_file, use_cache=use_cache, progress=progress)
+            apply_voice_gate(markers, analysis.voices)
+        except sg.GateUnavailable as exc:
+            analysis.voice_gate_note = str(exc)
+            say(f"ECAPA voice gate skipped: {exc}")
+    if verify and markers:
+        verify_markers(analysis, n=verify_top, progress=progress)
+    return analysis
+
+
 def analyze(
     path: Path,
     *,
@@ -892,49 +957,74 @@ def analyze(
     verify: bool = True,
     verify_top: int = 8,
     voice_gate: bool = True,
+    isolate_vocals: Optional[bool] = None,
     progress: Optional[Callable[[str], None]] = None,
 ) -> Analysis:
     """Decode, transcribe, find pauses, gate speakers, score every window, verify the finalists.
 
     ``voice_gate`` adds the ECAPA one-voice check (needs uv; degrades with a note, never fails).
+    ``isolate_vocals`` controls Demucs vocal separation: ``True`` always separates first,
+    ``False`` never separates, and ``None`` (default) separates automatically when background
+    music/noise prevents any window from passing the gates (unless ``$VOXXY_ISOLATE_VOCALS``
+    is ``0``/``off``).
     """
-    say = progress or (lambda _m: None)
-    say("decoding audio")
-    audio = decode_audio(path)
-    duration = len(audio) / SAMPLE_RATE
-    if words is None:
-        say(f"transcribing {duration:.0f}s with {whisper_model_name()}")
-        words = transcribe_file(path, audio, use_cache=use_cache)
-    say("analysing pauses and speakers")
-    feats = frame_features(audio)
-    pauses, level, below = detect_pauses(feats.db, duration)
-    spk = speaker_map(feats, speech_thr_db=level - below)
-    markers = score_windows(
-        audio, words, pauses, feats, speakers=spk, speech_thr_db=level - below,
-        min_seconds=min_seconds, max_seconds=max_seconds,
-    )
-    analysis = Analysis(
-        path=str(path), duration=duration, words=words, pauses=pauses, speech_level_db=level,
-        pause_below_db=below, speakers=spk, markers=markers, audio=audio, feats=feats,
-    )
-    if voice_gate and markers and os.environ.get("VOXXY_VOICE_GATE", "").lower() not in ("0", "off", "false", "no"):
-        from voxxy import speakergate as sg
+    from voxxy import vocals as vc
 
+    say = progress or (lambda _m: None)
+    env_iso = os.environ.get("VOXXY_ISOLATE_VOCALS", "").lower()
+    auto_isolate = isolate_vocals is None and env_iso not in ("0", "off", "false", "no")
+
+    if isolate_vocals is True:
         try:
-            analysis.voices = sg.embed_source(path, use_cache=use_cache, progress=progress)
-            apply_voice_gate(markers, analysis.voices)
-        except sg.GateUnavailable as exc:
-            analysis.voice_gate_note = str(exc)
-            say(f"ECAPA voice gate skipped: {exc}")
-    if verify and markers:
-        verify_markers(analysis, n=verify_top, progress=progress)
+            vocal_wav = vc.isolate_vocals(path, use_cache=use_cache, progress=progress)
+        except vc.VocalIsolationUnavailable as exc:
+            raise RuntimeError(f"vocal isolation failed: {exc}") from exc
+        return _analyze_pass(
+            vocal_wav, source_path=path, min_seconds=min_seconds, max_seconds=max_seconds,
+            words=words, use_cache=use_cache, verify=verify, verify_top=verify_top,
+            voice_gate=voice_gate, vocals_isolated=True, progress=progress,
+        )
+
+    if auto_isolate and use_cache:
+        cached = vc.cached_vocals(path)
+        if cached is not None:
+            return _analyze_pass(
+                cached, source_path=path, min_seconds=min_seconds, max_seconds=max_seconds,
+                words=words, use_cache=use_cache, verify=verify, verify_top=verify_top,
+                voice_gate=voice_gate, vocals_isolated=True, progress=progress,
+            )
+
+    analysis = _analyze_pass(
+        path, source_path=path, min_seconds=min_seconds, max_seconds=max_seconds,
+        words=words, use_cache=use_cache, verify=verify, verify_top=verify_top,
+        voice_gate=voice_gate, vocals_isolated=False, progress=progress,
+    )
+
+    if auto_isolate and vc.needs_vocal_isolation(analysis):
+        try:
+            vocal_wav = vc.isolate_vocals(path, use_cache=use_cache, progress=progress)
+        except vc.VocalIsolationUnavailable as exc:
+            analysis.isolation_note = str(exc)
+            say(f"vocal isolation skipped: {exc}")
+            return analysis
+        reuse_words = (
+            analysis.words
+            if words is not None or len(analysis.words) >= max(10, analysis.duration * 0.8)
+            else None
+        )
+        return _analyze_pass(
+            vocal_wav, source_path=path, min_seconds=min_seconds, max_seconds=max_seconds,
+            words=reuse_words, use_cache=use_cache, verify=verify, verify_top=verify_top,
+            voice_gate=voice_gate, vocals_isolated=True, progress=progress,
+        )
+
     return analysis
 
 
 def markers_payload(analysis: Analysis, markers: Sequence[Marker]) -> dict[str, Any]:
     """JSON-serialisable markers file (what `--markers FILE` / workdir markers.json hold)."""
     spk = analysis.speakers
-    return {
+    payload: dict[str, Any] = {
         "source": analysis.path,
         "duration": round(analysis.duration, 3),
         "words": len(analysis.words),
@@ -942,8 +1032,12 @@ def markers_payload(analysis: Analysis, markers: Sequence[Marker]) -> dict[str, 
         "pause_below_db": analysis.pause_below_db,
         "speakers": None if spk is None else {"clusters": spk.n_clusters, "dominant": spk.dominant},
         "voice_gate": "ecapa" if analysis.voices is not None else (analysis.voice_gate_note or "off"),
+        "vocals_isolated": analysis.vocals_isolated,
         "candidates": [m.to_dict() for m in markers],
     }
+    if analysis.audio_path:
+        payload["audio_path"] = analysis.audio_path
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1064,7 +1158,7 @@ def verify_markers(analysis: Analysis, *, n: int = 10, progress: Optional[Callab
                 progress(f"verifying candidate {i}/{len(chosen)}")
             clip = Path(tmp) / f"c{i}.wav"
             try:
-                export_clip(Path(analysis.path), clip, m.start, m.end)
+                export_clip(analysis.export_source, clip, m.start, m.end)
                 clip_words = transcribe(decode_audio(clip), beam_size=1)
             except CloneDepsMissing:
                 raise

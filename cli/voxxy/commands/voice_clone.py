@@ -33,7 +33,8 @@ from rich.table import Table
 
 from voxxy import clone as cl
 from voxxy import refclip
-from voxxy.audio import FfmpegMissing
+from voxxy import vocals as vc
+from voxxy.audio import FfmpegMissing, probe
 from voxxy.client import VoxClient, VoxError, VoxNotFound, VoxUnreachable
 from voxxy.config import ProjectNotFound, load_config
 from voxxy.llm import CloneLLM
@@ -49,6 +50,7 @@ PICK_POOL = 10  # candidates shown, pickable with --pick, and written to markers
 def register(voice_app: typer.Typer) -> None:
     voice_app.command("candidates")(candidates)
     voice_app.command("clone")(clone)
+    voice_app.command("isolate")(isolate)
 
 
 # ---------------------------------------------------------------------------
@@ -61,9 +63,24 @@ def _fail(message: str, code: int = 1) -> typer.Exit:
     return typer.Exit(code=code)
 
 
+def isolate_or_exit(
+    path: Path, dst: Optional[Path] = None, *, model: str = vc.DEFAULT_MODEL,
+    device: str = "auto", use_cache: bool = True,
+) -> Path:
+    """Run Demucs vocal isolation with a spinner, exiting cleanly on failure."""
+    try:
+        with console.status(f"[cyan]isolating vocals (Demucs {model})[/cyan]") as status:
+            return vc.isolate_vocals(
+                path, dst, model=model, device=device, use_cache=use_cache,
+                progress=lambda m: status.update(f"[cyan]{m}[/cyan]"),
+            )
+    except vc.VocalIsolationUnavailable as exc:
+        raise _fail(f"vocal isolation failed: {exc}")
+
+
 def analyze_or_exit(
     path: Path, *, min_seconds: float, max_seconds: float, label: str = "analysing", use_cache: bool = True,
-    soft: bool = False,
+    soft: bool = False, isolate: Optional[bool] = None,
 ) -> refclip.Analysis:
     """Run the refclip analysis with a spinner, turning every failure into a clean exit.
 
@@ -75,6 +92,7 @@ def analyze_or_exit(
         with console.status(f"[cyan]{label}[/cyan]") as status:
             return refclip.analyze(
                 path, min_seconds=min_seconds, max_seconds=max_seconds, use_cache=use_cache,
+                isolate_vocals=isolate,
                 progress=lambda m: status.update(f"[cyan]{label}: {m}[/cyan]"),
             )
     except refclip.CloneDepsMissing as exc:
@@ -201,6 +219,51 @@ def pick_marker(
 
 
 # ---------------------------------------------------------------------------
+# voxxy voice isolate
+# ---------------------------------------------------------------------------
+
+
+def isolate(
+    path: Path = typer.Argument(..., help="Source audio/video file to extract vocals from."),
+    output: Optional[Path] = typer.Option(None, "-o", "--output", help="Output WAV path (default: <stem>_vocals.wav next to source)."),
+    model: str = typer.Option(vc.DEFAULT_MODEL, "-m", "--model", help="Demucs model name (htdemucs or htdemucs_ft)."),
+    device: str = typer.Option("auto", "--device", help="Device for Demucs: auto, cuda, or cpu."),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Re-run Demucs instead of reusing the cached vocal stem."),
+    as_json: bool = typer.Option(False, "-j", "--json", help="Print result as JSON."),
+) -> None:
+    """Isolate the vocal track from background music using Demucs.
+
+    Writes a clean vocal WAV (`<stem>_vocals.wav` by default) and caches the separated
+    stem under `~/.cache/voxxy/refclip/` so subsequent `voxxy voice candidates` or
+    `voxxy voice add --auto` on the original file reuse it automatically.
+
+    Examples:
+
+      heavy voxxy voice isolate kurzgesagt.mp3
+      heavy voxxy voice isolate kurzgesagt.mp3 -o kurzgesagt_vocals.wav
+    """
+    if not path.is_file():
+        raise _fail(f"not found: {path}", 4)
+    dst = output if output is not None else path.with_name(f"{path.stem}_vocals.wav")
+    out_path = isolate_or_exit(path, dst, model=model, device=device, use_cache=not no_cache)
+    duration = None
+    try:
+        duration = round(probe(out_path).duration, 2)
+    except Exception:  # noqa: BLE001
+        pass
+    if as_json:
+        typer.echo(_json.dumps({
+            "source": str(path),
+            "vocals": str(out_path),
+            "model": model,
+            "duration": duration,
+        }, indent=2))
+    else:
+        dur_str = f" ({duration:.1f}s)" if duration is not None else ""
+        console.print(f"[green]isolated vocals[/green] → [cyan]{out_path}[/cyan]{dur_str}")
+
+
+# ---------------------------------------------------------------------------
 # voxxy voice candidates
 # ---------------------------------------------------------------------------
 
@@ -210,6 +273,10 @@ def candidates(
     top: int = typer.Option(5, "--top", "-n", min=1, help="How many non-overlapping candidates to list."),
     min_seconds: float = typer.Option(refclip.DEFAULT_MIN_SECONDS, "--min-seconds", help="Shortest clip."),
     max_seconds: float = typer.Option(refclip.DEFAULT_MAX_SECONDS, "--max-seconds", help="Longest clip."),
+    isolate: Optional[bool] = typer.Option(
+        None, "--isolate/--no-isolate",
+        help="Isolate vocals with Demucs before scoring (default: auto when background music blocks all windows).",
+    ),
     as_json: bool = typer.Option(False, "-j", "--json", help="Print the markers as JSON instead of a table."),
     markers_file: Optional[Path] = typer.Option(None, "--markers", help="Also write the markers JSON to FILE."),
     no_cache: bool = typer.Option(False, "--no-cache", help="Re-transcribe instead of using the cached transcript."),
@@ -218,12 +285,15 @@ def candidates(
 
     Transcribes with faster-whisper, finds energy pauses, and scores every span that
     starts after a pause and ends before one: whole sentences, no fillers or cut-off
-    fragments at the edges, one speaker, no music, no clipping. This is the same
-    analysis `voice add --auto` and `voice clone` use. Run big files through `heavy`.
+    fragments at the edges, one speaker, no music, no clipping. When background music
+    causes every window to fail, Demucs vocal isolation runs automatically and re-scores
+    the clean vocal stem. This is the same analysis `voice add --auto` and `voice clone`
+    use. Run big files through `heavy`.
 
     Examples:
 
       voxxy voice candidates interview.wav --top 5
+      voxxy voice candidates kurzgesagt.mp3 --isolate --top 5
       voxxy voice candidates talk.mp3 --json --markers /tmp/talk.markers.json
     """
     if not path.is_file():
@@ -231,7 +301,9 @@ def candidates(
     if min_seconds <= 0 or max_seconds < min_seconds:
         raise _fail("need 0 < --min-seconds <= --max-seconds", 2)
 
-    analysis = analyze_or_exit(path, min_seconds=min_seconds, max_seconds=max_seconds, use_cache=not no_cache)
+    analysis = analyze_or_exit(
+        path, min_seconds=min_seconds, max_seconds=max_seconds, use_cache=not no_cache, isolate=isolate,
+    )
     chosen = analysis.top(top)
     shown = chosen or analysis.top(top, include_rejected=True)
 
@@ -241,11 +313,14 @@ def candidates(
         typer.echo(_json.dumps(refclip.markers_payload(analysis, shown), indent=2, ensure_ascii=False))
     else:
         spk = analysis.speakers
+        iso_tag = ", vocals: isolated (Demucs)" if analysis.vocals_isolated else (
+            f", vocals: raw ({analysis.isolation_note})" if analysis.isolation_note else ""
+        )
         console.print(
             f"[dim]{analysis.duration:.1f}s, {len(analysis.words)} words, {len(analysis.pauses)} pauses "
             f"(pause = {analysis.pause_below_db:.0f} dB under speech), "
-            f"{'speakers: ' + str(spk.n_clusters) if spk else 'speaker gate: not enough speech'}, "
-            f"{len(analysis.markers)} windows scored[/dim]"
+            f"{'speakers: ' + str(spk.n_clusters) if spk else 'speaker gate: not enough speech'}"
+            f"{iso_tag}, {len(analysis.markers)} windows scored[/dim]"
         )
         if chosen:
             console.print(candidates_table(chosen, f"Top {len(chosen)} clean clips ({path.name})"))
@@ -353,7 +428,7 @@ def _attributed(identity: cl.Identity, video: cl.Video, analysis: refclip.Analys
 
 def _collect_attempts(
     identity: cl.Identity, videos: list[cl.Video], workdir: Path, *, max_videos: int, max_minutes: float,
-    min_seconds: float, max_seconds: float, llm=None,
+    min_seconds: float, max_seconds: float, llm=None, isolate: Optional[bool] = None,
 ) -> list[Attempt]:
     """Download and rank videos until one has a strong window. With ``llm`` (unattended), a window only counts when its
     words say the target is the one speaking, and markers.json lists exactly those windows (so --pick N indexes them)."""
@@ -369,7 +444,9 @@ def _collect_attempts(
             console.print(f"[yellow]{escape(str(exc))}; trying the next video[/yellow]")
             continue
         try:
-            analysis = analyze_or_exit(wav, min_seconds=min_seconds, max_seconds=max_seconds, label=f"video {k}", soft=True)
+            analysis = analyze_or_exit(
+                wav, min_seconds=min_seconds, max_seconds=max_seconds, label=f"video {k}", soft=True, isolate=isolate,
+            )
         except cl.CloneError as exc:
             console.print(f"  [yellow]{escape(str(exc))}; trying the next video[/yellow]")
             wav.unlink(missing_ok=True)
@@ -381,7 +458,8 @@ def _collect_attempts(
             top = analysis.top(PICK_POOL)
             write_markers(adir / "markers.json", analysis, refclip.select_top(analysis.markers, PICK_POOL))
         best = f"best {top[0].score:.2f} @ {top[0].start:.1f}-{top[0].end:.1f}s" if top else "no clean window"
-        console.print(f"  [dim]{analysis.duration:.0f}s audio, {len(analysis.markers)} windows, {best}[/dim]")
+        iso_note = ", vocals isolated" if analysis.vocals_isolated else ""
+        console.print(f"  [dim]{analysis.duration:.0f}s audio{iso_note}, {len(analysis.markers)} windows, {best}[/dim]")
         wanted = min(video.duration, max_minutes * 60)
         if wanted > 0 and analysis.duration < 0.6 * wanted:
             console.print(f"  [yellow]only {analysis.duration:.0f}s of the requested {wanted:.0f}s downloaded[/yellow]")
@@ -469,6 +547,10 @@ def clone(
     max_minutes: float = typer.Option(cl.DEFAULT_MAX_MINUTES, "--max-minutes", help="Download only the first N minutes of each video."),
     min_seconds: float = typer.Option(refclip.DEFAULT_MIN_SECONDS, "--min-seconds", help="Shortest reference clip."),
     max_seconds: float = typer.Option(refclip.DEFAULT_MAX_SECONDS, "--max-seconds", help="Longest reference clip."),
+    isolate: Optional[bool] = typer.Option(
+        None, "--isolate/--no-isolate",
+        help="Isolate vocals with Demucs (default: auto when background music blocks all windows).",
+    ),
     text: str = typer.Option(cl.DEFAULT_VERIFY_TEXT, "--text", help="Line synthesized to verify the new voice."),
     sink: Optional[str] = typer.Option(None, "-s", "--sink", help="Play the verification on this sink (default $VOX_SINK / config)."),
     no_play: bool = typer.Option(False, "--no-play", help="Never play audio (auditions, verification)."),
@@ -577,7 +659,7 @@ def clone(
     # 3-5. download, analyse, fall through on weak results
     attempts = _collect_attempts(
         identity, videos, workdir, max_videos=max_videos, max_minutes=max_minutes,
-        min_seconds=min_seconds, max_seconds=max_seconds, llm=None if interactive else llm,
+        min_seconds=min_seconds, max_seconds=max_seconds, llm=None if interactive else llm, isolate=isolate,
     )
     usable = [a for a in attempts if a.top]
     if not usable:
@@ -587,6 +669,7 @@ def clone(
         )
     chosen_attempt = max(usable, key=lambda a: a.best_score)
     source_wav = _finalize_workdir(workdir, chosen_attempt, attempts)
+    export_src = chosen_attempt.analysis.export_source if chosen_attempt.analysis.vocals_isolated else source_wav
 
     # 6. choose + export
     console.print(candidates_table(chosen_attempt.top, f"Candidates ({chosen_attempt.video.title[:50]})"))
@@ -603,10 +686,10 @@ def clone(
             "--pick N, or drop --yes to audition. The download and transcript are reused on a re-run.", 5,
         )
     marker = pick_marker(
-        source_wav, chosen_attempt.top, yes=yes, pick=pick, player=player_bin, can_play=not no_play,
+        export_src, chosen_attempt.top, yes=yes, pick=pick, player=player_bin, can_play=not no_play,
     )
     clip_path = workdir / f"{identity.slug}.wav"
-    prepared = prepare_clip(source_wav, clip_path, marker.start, marker.end, fallback_text=marker.text)
+    prepared = prepare_clip(export_src, clip_path, marker.start, marker.end, fallback_text=marker.text)
     prepared.marker = marker
     if not prepared.prompt_text:
         raise _fail("could not determine the transcript of the exported clip; refusing to upload without prompt_text")

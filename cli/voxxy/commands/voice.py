@@ -273,6 +273,10 @@ def add(
     end: float | None = typer.Option(None, "--end", help="Clip end in seconds (default: start + --max-seconds)."),
     min_seconds: float = typer.Option(refclip.DEFAULT_MIN_SECONDS, "--min-seconds", help="With --auto: shortest clip."),
     max_seconds: float = typer.Option(refclip.DEFAULT_MAX_SECONDS, "--max-seconds", help="With --auto/--start: longest clip."),
+    isolate: bool | None = typer.Option(
+        None, "--isolate/--no-isolate",
+        help="Isolate vocals with Demucs (default: auto with --auto when background music blocks all windows).",
+    ),
 ) -> None:
     """Upload an audio file as a new voice profile.
 
@@ -332,7 +336,7 @@ def add(
             # transcript. Replaces the plain trim below.
             prompt_text = _clean_reference(
                 path, Path(tmp_path), src_info.duration, auto=auto, start=start, end=end,
-                min_seconds=min_seconds, max_seconds=max_seconds, prompt_text=prompt_text,
+                min_seconds=min_seconds, max_seconds=max_seconds, prompt_text=prompt_text, isolate=isolate,
             )
         else:
             try:
@@ -460,7 +464,7 @@ def add(
 
 def _clean_reference(
     src: Path, dst: Path, source_duration: float, *, auto: bool, start: float | None, end: float | None,
-    min_seconds: float, max_seconds: float, prompt_text: str | None,
+    min_seconds: float, max_seconds: float, prompt_text: str | None, isolate: bool | None = None,
 ) -> str:
     """Write the cleaned window to ``dst`` and return the prompt_text to upload.
 
@@ -468,8 +472,9 @@ def _clean_reference(
     explicit span and only transcribe that span (cheap). An explicit --prompt-text
     always wins over the automatic transcript.
     """
+    export_src = src
     if auto:
-        analysis = voice_clone.analyze_or_exit(src, min_seconds=min_seconds, max_seconds=max_seconds)
+        analysis = voice_clone.analyze_or_exit(src, min_seconds=min_seconds, max_seconds=max_seconds, isolate=isolate)
         best = analysis.top(1)
         if not best:
             typer.secho(
@@ -479,12 +484,18 @@ def _clean_reference(
             )
             raise typer.Exit(code=1)
         marker = best[0]
+        if analysis.vocals_isolated:
+            export_src = analysis.export_source
+            console.print("[dim]vocals: isolated with Demucs[/dim]")
         console.print(
             f"auto: [cyan]{marker.start:.2f}-{marker.end:.2f}s[/cyan] "
             f"(score {marker.score:.2f}) [dim]{marker.text[:90]}[/dim]"
         )
         lo, hi, fallback = marker.start, marker.end, marker.text
     else:
+        if isolate:
+            export_src = voice_clone.isolate_or_exit(src)
+            console.print("[dim]vocals: isolated with Demucs[/dim]")
         lo = start if start is not None else 0.0
         hi = end if end is not None else lo + max_seconds
         if source_duration > 0:
@@ -500,7 +511,7 @@ def _clean_reference(
         fallback = ""
         console.print(f"window: [cyan]{lo:.2f}-{hi:.2f}s[/cyan]")
     with console.status("[cyan]exporting and transcribing the clip[/cyan]"):
-        prepared = voice_clone.prepare_clip(src, dst, lo, hi, fallback_text=fallback, prompt_text=prompt_text)
+        prepared = voice_clone.prepare_clip(export_src, dst, lo, hi, fallback_text=fallback, prompt_text=prompt_text)
     console.print(f"prompt_text: [dim]{prepared.prompt_text}[/dim]")
     return prepared.prompt_text
 
