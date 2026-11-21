@@ -2,6 +2,7 @@
 
 - HTTP API: POST /synthesize → audio/wav  (engine chain, returns winning bytes)
 - HTTP API: POST /synthesize-url → JSON   (engine fallback + URL return)
+- HTTP API: POST /v1/audio/speech → audio  (OpenAI-compatible; GET /v1/models)
 - Audio cache: GET /audio/{id}.ogg        (Telegram-ready OGG/Opus)
 - Sink relay: /sink/{key}/...             (play on the human's machine, not the caller's)
 - MCP at /mcp/ (streamable HTTP) for Hermes/OpenClaw/Claude Code
@@ -522,6 +523,14 @@ async def _validation_error_without_input(request: Request, exc: RequestValidati
         {"type": err.get("type"), "loc": list(err.get("loc", ())), "msg": err.get("msg")}
         for err in exc.errors()
     ]
+    if request.url.path.startswith("/v1/"):
+        # OpenAI-compatible routes answer in OpenAI's error envelope, 400 for a bad request.
+        first = errors[0] if errors else {}
+        where = ".".join(str(p) for p in first.get("loc", ()) if p != "body")
+        return _openai_error(
+            400, f"{where}: {first.get('msg')}" if where else str(first.get("msg")),
+            "invalid_request_error", code="invalid_request", param=where or None,
+        )
     return JSONResponse(status_code=422, content={"detail": errors})
 
 
@@ -643,6 +652,168 @@ async def synthesize_url(req: SynthesizeRequest, request: Request, response: Res
     if resp.voice_source:
         response.headers["X-Vox-Voice-Source"] = resp.voice_source
     return resp
+
+
+# ---------- OpenAI-compatible speech API ----------
+#
+# POST /v1/audio/speech and GET /v1/models, so any OpenAI-TTS client (earshot-relay's openai adapter,
+# Open WebUI, Home Assistant's OpenAI TTS, ...) can use vox as its voice. Same auth as everything else
+# (VOX_API_KEY as `Authorization: Bearer` or `X-API-Key`); the OpenAI SDK sends the Bearer form.
+
+# OpenAI's own voice names. They are not vox voices, so they get the default voice (and a header says so).
+OPENAI_STOCK_VOICES = frozenset({
+    "alloy", "ash", "ballad", "cedar", "coral", "echo", "fable", "marin",
+    "nova", "onyx", "sage", "shimmer", "verse",
+})
+# `model` names. "vox-local" (or "vox-local-<anything>") refuses the ElevenLabs fallback; the rest allow it.
+MODEL_LOCAL = "vox-local"
+MODEL_ANY = "vox"
+OPENAI_MODEL_IDS = (MODEL_LOCAL, MODEL_ANY)
+REQUIRE_LOCAL_HEADER = "x-vox-require-local"
+OPENAI_INPUT_MAX_CHARS = 4096  # OpenAI's own limit
+
+
+def _openai_error(
+    status: int, message: str, err_type: str, *, code: Optional[str] = None,
+    param: Optional[str] = None, headers: Optional[dict[str, str]] = None,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={"error": {"message": message, "type": err_type, "param": param, "code": code}},
+        headers=headers,
+    )
+
+
+def _header_safe(value: str) -> str:
+    """Response header values must be latin-1 and single-line."""
+    return "".join(c if 32 <= ord(c) < 127 else "?" for c in value)[:200]
+
+
+class SpeechRequest(BaseModel):
+    """OpenAI's `POST /v1/audio/speech` body. Unknown fields (`instructions`, `stream_format`) are ignored."""
+    model: str = Field(MODEL_ANY, max_length=100)
+    input: str = Field(..., min_length=1, max_length=OPENAI_INPUT_MAX_CHARS)
+    voice: Optional[str | dict[str, Any]] = None  # a name, or OpenAI's custom-voice object {"id": ...}
+    response_format: str = "mp3"
+    speed: float = Field(1.0, ge=0.25, le=4.0)
+
+    @field_validator("response_format")
+    @classmethod
+    def _known_format(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in audio_codec.OPENAI_FORMATS:
+            raise ValueError(f"response_format must be one of: {', '.join(audio_codec.OPENAI_FORMATS)}")
+        return v
+
+    @field_validator("input")
+    @classmethod
+    def _input_not_blank(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("input must not be blank")
+        return v
+
+    def voice_name(self) -> Optional[str]:
+        if isinstance(self.voice, dict):
+            raw = self.voice.get("id") or self.voice.get("name")
+            return str(raw).strip() if raw else None
+        return self.voice.strip() if self.voice and self.voice.strip() else None
+
+
+async def _speech_voice(requested: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """The vox voice for an OpenAI `voice` value, and a note when the default stood in.
+
+    A registered vox voice name is used as is. Anything else (an OpenAI stock name like ``alloy``, or a
+    name vox does not have) gets the default voice, and the note goes out in ``X-Vox-Voice-Fallback``.
+    """
+    assert _repo is not None
+    default = _default_voice() or None
+    if not requested:
+        return default, None
+    if await _repo.get(requested) is not None:
+        return requested, None
+    kind = "an OpenAI stock voice" if requested.lower() in OPENAI_STOCK_VOICES else "not a vox voice"
+    return default, f"{requested!r} is {kind}; used the default voice {default!r}"
+
+
+def _local_engine_names() -> list[str]:
+    assert _engine is not None
+    return [e.name for e in _engine._engines if e.name != ElevenLabsEngine.name]
+
+
+def _speech_failure(exc: Exception) -> JSONResponse:
+    http_exc = exc if isinstance(exc, HTTPException) else _http_error(exc, what="openai_speech")
+    headers = http_exc.headers or {}
+    return _openai_error(
+        http_exc.status_code, str(http_exc.detail),
+        "invalid_request_error" if http_exc.status_code < 500 and http_exc.status_code != 503 else "server_error",
+        code=headers.get("X-Vox-Error"), headers=headers or None,
+    )
+
+
+@app.post("/v1/audio/speech", responses={200: {"content": {"audio/*": {}}}})
+async def openai_speech(req: SpeechRequest, request: Request) -> Response:
+    """OpenAI-compatible text-to-speech: raw audio in ``response_format`` (default mp3, as OpenAI).
+
+    - ``voice``: a vox voice name. An OpenAI stock name (alloy, nova, ...) or an unknown name uses the
+      default voice (``VOX_DEFAULT_VOICE``) and says so in ``X-Vox-Voice-Fallback``. The voice used is
+      in ``X-Vox-Voice``.
+    - ``X-Vox-Engine`` names the engine that served. vox falls back to ElevenLabs (a stranger's voice)
+      when the GPU engines are down; to refuse that, send ``model: "vox-local"`` or the header
+      ``X-Vox-Require-Local: 1``: you then get 503 ``engines_unavailable`` instead of a fallback.
+    - ``speed`` 0.25-4.0 is applied with ffmpeg ``atempo``.
+    """
+    assert _engine is not None and _repo is not None
+    model = req.model.strip().lower()
+    header = request.headers.get(REQUIRE_LOCAL_HEADER, "").strip().lower()
+    require_local = (
+        model == MODEL_LOCAL or model.startswith(MODEL_LOCAL + "-") or header in {"1", "true", "yes"}
+    )
+    try:
+        voice, fallback_note = await _speech_voice(req.voice_name())
+        engines = None
+        if require_local:
+            engines = _local_engine_names()
+            if not engines:
+                return _openai_error(
+                    503, "no local engine is configured", "server_error", code="engines_unavailable",
+                    headers={"X-Vox-Error": "engines_unavailable"},
+                )
+        result = await _synthesize_wav(
+            text=req.input, voice_name=voice, cfg=2.0, steps=10, engines=engines,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _speech_failure(exc)
+    audio_bytes = result.wav_bytes
+    if req.response_format != "wav" or req.speed != 1.0:
+        try:
+            audio_bytes = await asyncio.to_thread(
+                audio_codec.transcode_openai, result.wav_bytes, req.response_format,
+                speed=req.speed, input_format="wav",
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("openai_speech transcode failed")
+            return _openai_error(500, "audio transcode failed", "server_error", code="transcode_failed")
+    headers = {
+        "X-Vox-Engine": result.engine,
+        "X-Vox-Voice-Source": result.voice_source,
+        "X-Vox-Voice": _header_safe(voice or ""),
+    }
+    if fallback_note:
+        headers["X-Vox-Voice-Fallback"] = _header_safe(fallback_note)
+    return Response(
+        content=audio_bytes, media_type=audio_codec.OPENAI_FORMATS[req.response_format][1], headers=headers,
+    )
+
+
+@app.get("/v1/models")
+async def openai_models() -> dict:
+    """OpenAI's model list, for clients that probe it before speaking."""
+    return {
+        "object": "list",
+        "data": [
+            {"id": mid, "object": "model", "created": 0, "owned_by": "vox"} for mid in OPENAI_MODEL_IDS
+        ],
+    }
 
 
 @app.get("/audio/{cache_id}.ogg", name="get_audio")
