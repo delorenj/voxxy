@@ -167,6 +167,8 @@ directly.
 |----------|--------------|
 | `POST /synthesize` | Raw WAV bytes inline. Use when an agent needs to process bytes (splice, analyze, loop). Routes through the engine chain. |
 | `POST /synthesize-url` | Runs the engine chain, transcodes WAV → OGG/Opus, returns `{audio_url, engine, duration_s, bytes}`. Telegram/Discord/HA-ready. |
+| `POST /v1/audio/speech` | **OpenAI-compatible** speech: `{model, input, voice, response_format wav\|mp3\|opus\|flac\|aac\|pcm, speed}` in, raw audio out. See [OpenAI-compatible speech](#openai-compatible-speech). |
+| `GET /v1/models` | OpenAI model list (`vox-local`, `vox`), for clients that probe it. |
 | `GET /voices` | List voice profiles. |
 | `POST /voices` | Upload a reference clip; auto-trimmed, stored under `VOX_VOICES_DIR`, `vibevoice_ref_path` auto-populated. |
 | `GET /audio/<id>.ogg` | Fetch a cached synthesis blob. Hex-only ids (path-traversal guarded); TTL-swept. |
@@ -178,12 +180,47 @@ directly.
 | `GET /mcp/` | FastMCP streamable HTTP endpoint (trailing slash required). Tools: `vox:speak`, `vox:speak_url`, `vox:speak_sink`, `vox:list_voices`. |
 
 
+## OpenAI-compatible speech
+
+`POST https://vox.delo.sh/v1/audio/speech` speaks OpenAI's text-to-speech API, so any OpenAI-TTS client can use
+vox as its voice by pointing its base URL at `https://vox.delo.sh/v1`: the earshot-relay (`EARSHOT_RELAY_TTS_URL`),
+Open WebUI, Home Assistant's OpenAI TTS, the OpenAI SDKs.
+
+```bash
+curl -fsS https://vox.delo.sh/v1/audio/speech -H "Authorization: Bearer $VOX_API_KEY" \
+  -H 'content-type: application/json' -o hello.opus \
+  -d '{"model":"vox-local","input":"Hello from vox.","voice":"rick","response_format":"opus"}'
+```
+
+| Field | Notes |
+|-------|-------|
+| `input` | Required, up to 4096 characters (OpenAI's limit). |
+| `voice` | A vox voice name (`GET /voices`), or `{"id": "<name>"}`. OpenAI's stock names (`alloy`, `nova`, ...) and unknown names use the default voice (`VOX_DEFAULT_VOICE`, `rick`); the response says so in `X-Vox-Voice-Fallback`. `X-Vox-Voice` is the voice used. |
+| `response_format` | `wav`, `mp3` (default, as OpenAI), `opus` (Ogg/Opus), `flac`, `aac`, `pcm` (raw s16le, 24 kHz, mono). Content-Type matches. |
+| `speed` | 0.25-4.0, applied with ffmpeg `atempo`. |
+| `model` | `vox-local` refuses the ElevenLabs fallback (below). Any other value (`vox`, `tts-1`, ...) allows it. Other OpenAI fields (`instructions`, `stream_format`) are ignored. |
+
+**Which engine served** is in `X-Vox-Engine`. vox falls back to ElevenLabs, a stranger's voice, when the GPU engines
+are down. To refuse that, send `"model": "vox-local"` (or any `vox-local-*`) or the header `X-Vox-Require-Local: 1`
+(for clients that cannot change the model): the request then fails with `503` and `X-Vox-Error: engines_unavailable`
+instead of answering in another voice. Use it for anything that must sound like your voice.
+
+Errors use OpenAI's envelope: `{"error": {"message", "type", "param", "code"}}`; a bad request is `400`.
+Auth is the same as every other data-plane route: when `VOX_API_KEY` is set, send it as `Authorization: Bearer <key>`
+(what OpenAI clients do) or `X-API-Key`. The relay sends its `EARSHOT_RELAY_TTS_API_KEY` as that Bearer token.
+Synthesis runs about 21 characters per second, so give a client's timeout room (`EARSHOT_RELAY_TTS_TIMEOUT_S`).
+
+Earshot relay settings for vox: `EARSHOT_RELAY_TTS_URL=https://vox.delo.sh/v1`, `EARSHOT_RELAY_TTS_MODEL=vox-local`,
+`EARSHOT_RELAY_TTS_VOICE=<a vox voice>`, `EARSHOT_RELAY_TTS_API_KEY` (only if `VOX_API_KEY` is set),
+`EARSHOT_RELAY_TTS_FORMAT=mp3` (or `wav`).
+
 ### Securing `vox.delo.sh` with `VOX_API_KEY`
 
 Set `VOX_API_KEY` on `voxxy-core` to require auth for the useful data plane:
 
 - `POST /synthesize`
 - `POST /synthesize-url`
+- `POST /v1/audio/speech`, `GET /v1/models`
 - `/voices*`
 - `/mcp*`
 
