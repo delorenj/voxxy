@@ -1,0 +1,28 @@
+{
+  "specversion": "1.0",
+  "id": "8ffed827-8858-44de-bf36-0d43010fd135",
+  "source": "hermes://agent/voxxy-pm",
+  "type": "bloodbank.repo.decision.recorded",
+  "time": "2026-11-22T17:39:14Z",
+  "datacontenttype": "application/json",
+  "kind": "event",
+  "domain": "repo",
+  "producer": "hermes-agent:voxxy-pm",
+  "service": "voxxy",
+  "actor": {"type": "agent_cli", "agent_id": "voxxy-pm"},
+  "ordering_key": "repo:voxxy",
+  "correlationid": "da7da010-bcd6-537e-bbae-e1da4fddb732",
+  "causationid": null,
+  "data": {
+    "repo": "voxxy",
+    "decision": "Accept reusable character-sound foundation for Krebs; hold Hermes integration on an explicit upstream reply lifecycle contract",
+    "basis": ["build-lego-not-statues", "gang-of-four-by-default", "belsky-doctrine"],
+    "reasoning": "Choose a character-configured audio decorator rather than hard-coded examples or text sound directives. Voxxy complete-reply support is independently useful; Hermes owns chunking, completion and fallback and has no bound source board, so Flume coordinates ownership. No live activation or decision-event publication was authorized in this turn; this envelope is a local record only.",
+    "decided_by": "voxxy-pm",
+    "decided_at": "2026-11-22T17:39:14Z",
+    "issue": "VOXXY-4",
+    "related_issues": ["VOXXY-5", "FLUME-110"],
+    "doctrine_pointer": "~/code/33GOD/momo/PILLARS.md",
+    "pillar_numbers": [3, 4]
+  }
+}
