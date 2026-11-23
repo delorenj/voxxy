@@ -856,7 +856,7 @@ async def sink_status(key: str) -> SinkStatus:
 async def sink_play(key: str, req: SinkPlayRequest) -> SinkPlayResponse:
     """Push an already-synthesized audio URL to a sink's listeners.
 
-    Deliberately thin so anything that can POST JSON -- Node-RED, n8n, a shell
+    Deliberately thin so anything that can POST JSON -- n8n, a shell
     script, an agent -- can reach the human's speakers without going through the
     CLI.
     """

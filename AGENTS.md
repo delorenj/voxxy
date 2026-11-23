@@ -27,7 +27,6 @@ Transports exposed by core:
 - **HTTP** (`POST /synthesize` → WAV bytes, `POST /synthesize-url` → OGG/Opus URL, `/voices` CRUD, `/audio/<id>.ogg` cache, `/healthz` with per-engine rollup)
 - **MCP** at `/mcp/` (FastMCP streamable HTTP) for Hermes / OpenClaw / Claude Code agents — tools: `speak`, `speak_url`, `speak_sink`, `list_voices_tool`
 - **Sink relay** at `/sink/<key>/...` — routes audio to the machine the human is at, not the caller's sound card
-- **Node-RED** via the sibling `node-red-contrib-vox/` package (thin HTTP wrapper)
 
 Voice profile metadata lives in a host postgres DB (`vox`); reference WAV bytes live on disk under `./voices/` (bind-mounted to core at `/data/voices`, read by core and shipped inline as base64 to engines — engines are stateless, no shared volume); transcoded OGG/Opus delivery blobs live under `./audio-cache/` (bind-mounted to `/data/audio-cache`, TTL-swept).
 

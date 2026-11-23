@@ -3,10 +3,9 @@
 A small FastAPI + FastMCP front-end that unifies multiple local TTS engines
 (`voxcpm`, `vibevoice`) plus ElevenLabs as an automatic remote fallback, with
 a postgres-backed voice profile store and a disk-backed OGG/Opus URL cache.
-One logical service, three transports, every delivery surface:
+One logical service, every delivery surface:
 
 - **OpenClaw / Hermes / Claude Code** via MCP (`vox:speak_url` → Telegram sendVoice, `vox:speak` for inline bytes)
-- **Node-RED** via the `node-red-contrib-vox` package
 - **Anything else** via HTTP `POST /synthesize` (WAV bytes) or `POST /synthesize-url` (OGG/Opus URL)
 
 Engines live in their own containers so their dep trees (voxcpm vs
@@ -61,7 +60,6 @@ response carries an `engine` field (and `X-Vox-Engine` header on
 │   └── vibevoice/          vibevoice engine container (GPU)
 ├── voices/                 reference WAVs (bind-mounted; core ships them inline to engines)
 ├── audio-cache/            OGG blobs served at /audio/<id>.ogg (TTL'd, gitignored)
-├── node-red-contrib-vox/   custom Node-RED node
 ├── scripts/                shell CLIs (vox-speak, verify-engine-contract)
 ├── migrations/             numbered SQL migrations applied against host postgres
 ├── init.sql                fresh-install schema for host postgres db `vox`
@@ -534,14 +532,6 @@ If `/mcp/` is protected, configure your MCP client to send the same API key on
 requests (for example via a fixed header auth setting). The exact flag shape can
 vary by client/version, so check `hermes mcp add --help` or the client's auth
 settings rather than assuming an exported `VOX_API_KEY` is consumed automatically.
-
-### Node-RED
-
-```bash
-cd ~/.node-red
-npm install /home/delorenj/code/voxxy/node-red-contrib-vox
-# Restart Node-RED; drop the "vox tts" node into a flow.
-```
 
 ## Engine swap
 
