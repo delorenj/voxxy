@@ -1,6 +1,6 @@
 # Story: Voxxy web app v1
 
-Status: built, not yet deployed (2026-11-23)
+Status: deployed to https://vox.delo.sh/ (2026-11-23, commit 3e94180)
 Pillar: `belsky-doctrine`
 Decision source: `_bmad-output/planning-artifacts/voxxy-heyma-integration-scope.md` (Q2 both surfaces, Q3 product from day one, Q4 strict hosted)
 
@@ -58,7 +58,7 @@ Tests: `tests/test_web_app.py`.
 
 - `uv run pytest tests -q`, full output in `~/.local/state/voxxy/test-runs/webapp-build.log`.
 - Browser run (Playwright chromium, fake microphone) against a fake-repo harness: gate, Studio, desk panel, library, record flow, describe flow including the hosted refusal, delete. Desktop 1280 and mobile 375, light and dark, no horizontal overflow.
-- Not verified against the live server; nothing was deployed.
+- Verified live 2026-11-23: `/`, `/ui/*`, `/app-config` 200; Say synthesized and played in Chrome (Kapture); `/voices/design/preview` 200; a real-name description refused 422; consent challenge issued.
 
 ## Deferred
 
