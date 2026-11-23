@@ -1,6 +1,7 @@
 # Voxxy in HeyMa: integration scope
 
-Status: planning only, 2026-11-23. No code, stories or tickets yet.
+Status: in build, 2026-11-23. Jarad answered section 6 the same day ("I want to
+start immediately"); see section 7 for what is built.
 Asked for: Jarad (2026-11-23) wants to package Voxxy once it has a polished
 interface and expects it to fit the HeyMa ecosystem. Crank asked for this scope
 first, with interface-direction choices parked for Jarad.
@@ -21,7 +22,7 @@ first product to follow it after the original four.
 | **Sink relay**: `GET /sink/{key}/events` (SSE), `POST /sink/{key}/play`, `POST /sink/{key}/say`. `voxxy listen --key <host>` on a desk machine plays whatever any caller sends to that key | `app/sink.py`, `cli/voxxy/commands/listen.py` |
 | `voxxy` CLI (Typer, `uv tool install`): `daemon`, `engine`, `voice`, `voice_clone`, `persona`, `speak`, `listen`, `health --json` (exit 0 ok, 2 degraded, 3 unreachable) | `cli/`, `docs/specs/voxxy-cli.md` |
 | Optional API-key guard exists (`VOX_API_KEY`, `app/auth.py`) but is **not enforced in production**: `GET /voices` answers 200 without a key | `docs/plans/voxxy-api-key-and-wrapper.md`, probed 2026-11-23 |
-| Consumers today: the Hermes fleet (`tts.provider: vox`, plugin `plugins/tts/vox`), Holocene's inbox-watcher replies (`MEMO_VOX_URL`), Node-RED (`node-red-contrib-vox`), MCP clients | `docs/plans/hermes-voxxy-tts-plugin.md`, `holocene/services/inbox-watcher/memo_common.py` |
+| Consumers today: the Hermes fleet (`tts.provider: vox`, plugin `plugins/tts/vox`), Holocene's inbox-watcher replies (`MEMO_VOX_URL`), MCP clients. Node-RED is retired (package removed 2026-11-23) | `docs/plans/hermes-voxxy-tts-plugin.md`, `holocene/services/inbox-watcher/memo_common.py` |
 | No web UI or TUI ("deferred" in the CLI spec). The only polished surface is the CLI | `docs/specs/voxxy-cli.md` section 1 |
 | `docs/monetization-strategy.md` (2026-04-26) proposes Free/Hobbyist/Pro/Enterprise tiers and a voice marketplace. It is aspirational and predates the current fleet | the file |
 | In flight: the character-sounds spec (intro/outro clips, interjections per character) | `_bmad-output/specs/spec-character-sounds/` |
@@ -96,9 +97,21 @@ Stories: Voxxy-side work (V2 unit, V5) goes in Voxxy's BMAD; shell work (V1, V2
 row, V3, V4) goes in HeyMa's BMAD as stories under the HeyMa shell epic. Neither
 is written yet.
 
-## 6. Needs Jarad (parked interface and product choices)
+## 6. Decisions (Jarad, 2026-11-23, dictated)
 
-Each has a recommendation and the default used if you say nothing.
+| # | Question | Decision |
+|---|---|---|
+| Q1 | Name in HeyMa | **Voxxy**. Never "Voices" |
+| Q2 | Where the polished interface lives | **Both**: a section in the HeyMa tray and a Voxxy web app |
+| Q3 | Who it is for | **A product from day one**: pricing tiers, a self-hosted edition, per-customer keys. Pricing and positioning: `voxxy-product-and-pricing.md` |
+| Q4 | Voice cloning | Cloning works from your own recordings, with voice fingerprinting. The **hosted web app is strict**: your own voice, or describe a voice; never someone else's. The **self-hosted edition** (flat fee, about $50) carries no such rule and the operator's own responsibility; that is implied, never advertised. Subscribers own the rights to voice files they download |
+| Q5 | Which hosts speak by default | Not answered; default stands (the desk you use most, others opt in through `heyma setup`) |
+| Q6 | Mac priority | **After the first three Linux pieces work** (V1 adapter, key, speak-here toggle) |
+| — | Node-RED | **Retired**. Package and docs removed from Voxxy |
+| — | Where it sells | **store.automaticai.io**, the second product after Earshot, under the HeyMa family (listing name: N1 in the pricing doc) |
+| — | API key | **Required** |
+
+The original questions and recommendations, kept for the record:
 
 | # | Question | Recommendation | Default |
 |---|---|---|---|
@@ -111,3 +124,12 @@ Each has a recommendation and the default used if you say nothing.
 
 No spending is implied by any seam above. The Developer ID HeyMa.app already
 uses would cover a Mac build.
+
+## 7. Built (2026-11-23)
+
+| Seam | State | Where |
+|---|---|---|
+| V1 | Built and live. `heyma status` shows `voxxy ok · up · voxcpm, elevenlabs ready`; tray submenu "Voxxy" with "Say a test line" and "Open Voxxy". Contract written into `docs/heyma-shell.md` (stories S9 to S12) | HeyMa `1f29988` |
+| V5 key | Vault item "Voxxy API Key - vox.delo.sh" (`op://DeLoSecrets/mpxfavdfzeqh7ahqc2r3qa6aki/credential`). One convention for every caller: `$VOX_API_KEY`, else `$VOX_API_KEY_REF` (op://), else `api_key_ref` in `~/.config/voxxy/config.toml`. Wired: voxxy CLI, Hermes `tts/vox` and `voice-persona` plugins (gateway drop-in), Holocene inbox-watcher and API, Genesis (`GENESIS_VOX_KEY`), Flume voice checks, the shell, `notify-vox.sh`. Listening on a sink (`GET /sink/{key}`, `/events`) stays public, so Mac listeners need no key | voxxy `e9f89b2`, `a38507d`; holocene `d058ca3`; genesis `2108bf2`; flume |
+| V2 | Next: `voxxy-listen.service` and the tray toggle | |
+| V3 | After V2: the `heyma setup` Voxxy step writes `default_url`, the sink key and `api_key_ref` | |
