@@ -61,6 +61,9 @@ def register(app: typer.Typer) -> None:
 def register_sink(sink_app: typer.Typer) -> None:
     """Register the `sink` subcommand group."""
     sink_app.command("status")(sink_status)
+    sink_app.command("on")(sink_on)
+    sink_app.command("off")(sink_off)
+    sink_app.command("toggle")(sink_toggle)
 
 
 def default_sink_key() -> str:
@@ -219,22 +222,26 @@ def sink_status(
     """Show how many machines are listening on a sink."""
     import json as _json
 
+    from voxxy.commands import desk
+
     cfg = load_config()
     base_url = url or os.environ.get("VOX_URL") or cfg.default_url
-    sink_key = resolve_key(key, cfg.default_sink)
+    local = desk.local_state()
+    # This desk's own unit names the sink it speaks for, unless a key is asked for.
+    sink_key = key or local.get("key") or resolve_key(None, cfg.default_sink)
 
     client = VoxClient(base_url)
     try:
         status = client.sink_status(sink_key)
     except VoxError as exc:
         if json_out:
-            typer.echo(_json.dumps({"key": sink_key, "error": str(exc)}))
+            typer.echo(_json.dumps({"key": sink_key, "error": str(exc), "local": local}))
         else:
             console.print(f"[red]{exc}[/red]")
         raise typer.Exit(code=3)
 
     if json_out:
-        typer.echo(_json.dumps(status.model_dump()))
+        typer.echo(_json.dumps({**status.model_dump(), "local": local}))
         return
 
     if status.listeners:
@@ -247,3 +254,56 @@ def sink_status(
             f"[yellow]{status.key}[/yellow]: nobody listening "
             f"([dim]run 'voxxy listen --key {status.key}' where you are[/dim])"
         )
+
+
+def _desk_switch(turn: str, key: Optional[str], url: Optional[str], json_out: bool) -> None:
+    import json as _json
+
+    from voxxy.commands import desk
+
+    cfg = load_config()
+    try:
+        if turn == "toggle":
+            turn = "off" if desk.local_state()["active"] else "on"
+        if turn == "on":
+            # This desk's own name, not $VOX_SINK: that is where this shell *sends*
+            # (often the laptop you ssh in from), not what this machine plays.
+            sink_key = key or default_sink_key()
+            state = desk.turn_on(sink_key, desk.env_url(cfg.default_url, url))
+        else:
+            state = desk.turn_off()
+    except desk.DeskError as exc:
+        if json_out:
+            typer.echo(_json.dumps({"ok": False, "error": str(exc)}))
+        else:
+            console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1)
+    if json_out:
+        typer.echo(_json.dumps({"ok": True, **state}))
+    elif state["active"]:
+        console.print(f"[green]speaking on this desk[/green] (sink [cyan]{state['key']}[/cyan])")
+    else:
+        console.print("[yellow]not speaking on this desk[/yellow]")
+
+
+_KEY_OPT = typer.Option(None, "-k", "--key",
+                        help="Sink name this desk plays. Defaults to this machine's hostname.")
+_URL_OPT = typer.Option(None, "-u", "--url", help="Base URL. Defaults to $VOX_URL or config.default_url.")
+_JSON_OPT = typer.Option(False, "--json", help="Emit JSON.")
+
+
+def sink_on(key: Optional[str] = _KEY_OPT, url: Optional[str] = _URL_OPT,
+            json_out: bool = _JSON_OPT) -> None:
+    """Speak on this desk: install and start the voxxy-listen user unit (Linux)."""
+    _desk_switch("on", key, url, json_out)
+
+
+def sink_off(json_out: bool = _JSON_OPT) -> None:
+    """Stop speaking on this desk: stop and disable the voxxy-listen user unit."""
+    _desk_switch("off", None, None, json_out)
+
+
+def sink_toggle(key: Optional[str] = _KEY_OPT, url: Optional[str] = _URL_OPT,
+                json_out: bool = _JSON_OPT) -> None:
+    """Flip "speak on this desk" (what HeyMa's tray row calls)."""
+    _desk_switch("toggle", key, url, json_out)
