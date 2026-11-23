@@ -317,7 +317,29 @@ def _vox_settings() -> Tuple[str, Optional[str]]:
     section = section if isinstance(section, dict) else {}
     base = str(section.get("base_url") or os.environ.get("VOX_URL") or DEFAULT_VOX_URL).strip().rstrip("/")
     key = str(section.get("api_key") or os.environ.get("VOX_API_KEY") or "").strip()
+    if not key:
+        # A 1Password reference (tts.vox.api_key_ref or $VOX_API_KEY_REF), read once: the vox provider's convention.
+        ref = str(section.get("api_key_ref") or os.environ.get("VOX_API_KEY_REF") or "").strip()
+        key = (_read_op_ref(ref) or "") if ref else ""
     return base or DEFAULT_VOX_URL, key or None
+
+
+_OP_REF_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _read_op_ref(ref: str) -> Optional[str]:
+    """`op read <ref>`, cached per process. None when op is missing or the read fails."""
+    if ref not in _OP_REF_CACHE:
+        import subprocess
+
+        try:
+            done = subprocess.run(["op", "read", "--no-newline", ref], capture_output=True,
+                                  text=True, timeout=20, stdin=subprocess.DEVNULL)
+            value = done.stdout.strip() if done.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            value = ""
+        _OP_REF_CACHE[ref] = value or None
+    return _OP_REF_CACHE[ref]
 
 
 def _fetch_voice_record(base: str, voice: str, api_key: Optional[str], timeout: float) -> Dict[str, Any]:
