@@ -83,3 +83,36 @@ def test_fetch_audio_does_not_forward_auth_headers(monkeypatch: pytest.MonkeyPat
 
     assert audio == b"OGGDATA"
     assert seen["url"] == "https://cdn.example.com/audio/demo.ogg"
+
+
+def test_env_api_key_prefers_the_value_then_reads_the_ref_once(monkeypatch) -> None:
+    import subprocess
+
+    from voxxy import client as client_mod
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="from-vault\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(client_mod, "_REF_CACHE", {})
+    ref = "op://DeLoSecrets/item/credential"
+    assert client_mod.env_api_key({"VOX_API_KEY": " direct ", "VOX_API_KEY_REF": ref}) == "direct"
+    assert calls == []
+    assert client_mod.env_api_key({"VOX_API_KEY_REF": ref}) == "from-vault"
+    assert client_mod.env_api_key({"VOX_API_KEY_REF": ref}) == "from-vault"
+    assert calls == [["op", "read", "--no-newline", ref]]
+    assert client_mod.env_api_key({}) is None
+
+
+def test_env_api_key_is_none_when_the_ref_cannot_be_read(monkeypatch) -> None:
+    import subprocess
+
+    from voxxy import client as client_mod
+
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr="no"))
+    monkeypatch.setattr(client_mod, "_REF_CACHE", {})
+    assert client_mod.env_api_key({"VOX_API_KEY_REF": "op://x/y/z"}) is None

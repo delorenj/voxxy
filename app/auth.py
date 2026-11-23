@@ -9,6 +9,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 PUBLIC_EXACT_PATHS = frozenset({
+    "/",
     "/healthz",
     "/install.sh",
     "/bin/vox-speak",
@@ -40,7 +41,14 @@ def is_public_request(method: str, path: str) -> bool:
     normalized = path if path == "/" else path.rstrip("/")
     if normalized in PUBLIC_EXACT_PATHS:
         return True
-    return normalized.startswith("/audio/") and normalized.endswith(".ogg")
+    if normalized.startswith("/audio/") and normalized.endswith(".ogg"):
+        return True
+    # Listening on a sink is read-only: the stream carries /audio URLs, which are
+    # already public. Desk listeners (a Mac's `voxxy listen`, HeyMa's speak-here
+    # toggle) need no key; sending to a sink (play, say) does.
+    parts = normalized.split("/")
+    return len(parts) in (3, 4) and parts[1] == "sink" and bool(parts[2]) and \
+        (len(parts) == 3 or parts[3] == "events")
 
 
 def headers_have_valid_api_key(headers: Headers, expected_key: str) -> bool:

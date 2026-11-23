@@ -26,6 +26,18 @@ def _build_app(api_key: str | None) -> FastAPI:
     async def vox_speak() -> dict[str, str]:
         return {"script": "vox-speak"}
 
+    @app.get("/sink/{key}")
+    async def sink_status(key: str) -> dict[str, str]:
+        return {"key": key}
+
+    @app.get("/sink/{key}/events")
+    async def sink_events(key: str) -> dict[str, str]:
+        return {"key": key}
+
+    @app.post("/sink/{key}/say")
+    async def sink_say(key: str) -> dict[str, str]:
+        return {"key": key}
+
     @app.get("/voices")
     async def voices() -> list[str]:
         return ["rick"]
@@ -91,3 +103,12 @@ def test_public_routes_remain_public_when_auth_is_enabled() -> None:
     assert client.get("/install.sh").status_code == 200
     assert client.get("/bin/vox-speak").status_code == 200
     assert client.get("/mcp/").status_code == 401
+
+
+def test_listening_on_a_sink_is_public_but_sending_to_one_is_not() -> None:
+    client = TestClient(_build_app("secret-key"))
+
+    assert client.get("/sink/big-chungus").status_code == 200
+    assert client.get("/sink/big-chungus/events").status_code == 200
+    assert client.post("/sink/big-chungus/say").status_code == 401
+    assert client.get("/sink").status_code in (401, 404)

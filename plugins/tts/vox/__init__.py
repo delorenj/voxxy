@@ -299,8 +299,13 @@ class VoxTTSProvider(TTSProvider):
         return section if isinstance(section, dict) else {}
 
     def _resolve_api_key(self) -> Optional[str]:
-        value = self._api_key or self._service_config().get("api_key") or os.environ.get("VOX_API_KEY")
-        return str(value).strip() if value else None
+        config = self._service_config()
+        value = self._api_key or config.get("api_key") or os.environ.get("VOX_API_KEY")
+        if value:
+            return str(value).strip() or None
+        # A 1Password reference (config `api_key_ref` or $VOX_API_KEY_REF), read once.
+        ref = str(config.get("api_key_ref") or os.environ.get("VOX_API_KEY_REF") or "").strip()
+        return _read_op_ref(ref) if ref else None
 
     def _headers(self) -> Dict[str, str]:
         headers = {"Accept": "audio/wav, audio/ogg, application/json"}
@@ -402,3 +407,21 @@ VoxxyTTSProvider = VoxTTSProvider
 VoxxyTTSProviderError = VoxTTSProviderError
 
 __all__ = ["VoxTTSProvider", "VoxTTSProviderError", "VoxxyTTSProvider", "VoxxyTTSProviderError", "register"]
+
+
+_OP_REF_CACHE: Dict[str, Optional[str]] = {}
+
+
+def _read_op_ref(ref: str) -> Optional[str]:
+    """`op read <ref>`, cached per process. None when op is missing or the read fails."""
+    if ref not in _OP_REF_CACHE:
+        import subprocess
+
+        try:
+            done = subprocess.run(["op", "read", "--no-newline", ref], capture_output=True,
+                                  text=True, timeout=20, stdin=subprocess.DEVNULL)
+            value = done.stdout.strip() if done.returncode == 0 else ""
+        except (OSError, subprocess.TimeoutExpired):
+            value = ""
+        _OP_REF_CACHE[ref] = value or None
+    return _OP_REF_CACHE[ref]

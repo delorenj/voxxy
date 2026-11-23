@@ -30,6 +30,34 @@ import httpx
 from pydantic import BaseModel, Field
 
 _USE_ENV = object()
+_REF_CACHE: dict[str, str | None] = {}
+
+
+def env_api_key(environ: Optional[dict] = None) -> str | None:
+    """The caller's Voxxy key: $VOX_API_KEY, else $VOX_API_KEY_REF read with `op read`.
+
+    A ref (op://DeLoSecrets/...) is what services and host config carry, so no
+    key is ever written to a file. Read once per process; a failed read is None
+    (the server then answers 401 and the caller names VOX_API_KEY).
+    """
+    env = os.environ if environ is None else environ
+    direct = (env.get("VOX_API_KEY") or "").strip()
+    if direct:
+        return direct
+    ref = (env.get("VOX_API_KEY_REF") or "").strip()
+    if not ref:
+        return None
+    if ref not in _REF_CACHE:
+        import subprocess
+
+        try:
+            done = subprocess.run(["op", "read", "--no-newline", ref], capture_output=True,
+                                  text=True, timeout=20, stdin=subprocess.DEVNULL)
+            value = done.stdout.strip() if done.returncode == 0 else ""
+            _REF_CACHE[ref] = value or None
+        except (OSError, subprocess.TimeoutExpired):
+            _REF_CACHE[ref] = None
+    return _REF_CACHE[ref]
 
 
 # ---------- typed exceptions ----------
@@ -162,7 +190,7 @@ class VoxClient:
 
     @staticmethod
     def _resolve_api_key(api_key: str | None | object) -> str | None:
-        raw = os.environ.get("VOX_API_KEY") if api_key is _USE_ENV else api_key
+        raw = env_api_key() if api_key is _USE_ENV else api_key
         if raw is None:
             return None
         cleaned = str(raw).strip()

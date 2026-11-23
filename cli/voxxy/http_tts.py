@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from voxxy.client import (
+    env_api_key,
     SynthUrlResponse,
     VoxClient,
     VoxError,
@@ -44,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--text-file", type=Path, help="Read synthesis text from a UTF-8 file.")
     parser.add_argument("--voice", help="Voice slug. Defaults to VOX_VOICE.")
     parser.add_argument("--url", help=f"Voxxy base URL. Defaults to VOX_URL or {DEFAULT_URL}.")
-    parser.add_argument("--api-key", help="API key. Defaults to VOX_API_KEY.")
+    parser.add_argument("--api-key", help="API key. Defaults to VOX_API_KEY, then VOX_API_KEY_REF (op://).")
     parser.add_argument("--format", choices=sorted(SUPPORTED_FORMATS), help="Output format. Defaults to --out suffix or wav.")
     parser.add_argument("--cfg", type=float, default=2.0, help="CFG value for synthesis (default: 2.0).")
     parser.add_argument("--steps", type=int, default=10, help="Diffusion steps for synthesis (default: 10).")
@@ -196,7 +197,7 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     base_url = (args.url or os.environ.get("VOX_URL") or DEFAULT_URL).strip().rstrip("/")
     voice = args.voice or os.environ.get("VOX_VOICE") or None
-    api_key = args.api_key if args.api_key is not None else os.environ.get("VOX_API_KEY")
+    api_key = args.api_key if args.api_key is not None else env_api_key()
 
     client = VoxClient(base_url, api_key=api_key)
     try:

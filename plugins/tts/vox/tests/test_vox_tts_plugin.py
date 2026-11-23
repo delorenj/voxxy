@@ -270,3 +270,23 @@ def test_live_vox_synthesis_writes_local_ogg_opus(tmp_path: Path) -> None:
     data = output.read_bytes()
     assert output.suffix == ".ogg"
     assert data[:4] == b"OggS" and b"OpusHead" in data[:128]
+
+
+def test_api_key_ref_is_read_once_through_op(monkeypatch):
+    import subprocess
+
+    module = _load_plugin_module()
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, stdout="vault-key\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_OP_REF_CACHE", {})
+    monkeypatch.delenv("VOX_API_KEY", raising=False)
+    monkeypatch.setenv("VOX_API_KEY_REF", "op://DeLoSecrets/item/credential")
+    provider = module.VoxTTSProvider(base_url="https://vox.example")
+    assert provider._headers()["Authorization"] == "Bearer vault-key"
+    assert provider._headers()["X-API-Key"] == "vault-key"
+    assert calls == [["op", "read", "--no-newline", "op://DeLoSecrets/item/credential"]]
