@@ -116,3 +116,20 @@ def test_env_api_key_is_none_when_the_ref_cannot_be_read(monkeypatch) -> None:
                         lambda argv, **kw: subprocess.CompletedProcess(argv, 1, stdout="", stderr="no"))
     monkeypatch.setattr(client_mod, "_REF_CACHE", {})
     assert client_mod.env_api_key({"VOX_API_KEY_REF": "op://x/y/z"}) is None
+
+
+def test_env_api_key_falls_back_to_the_config_ref(monkeypatch, tmp_path) -> None:
+    import subprocess
+
+    from voxxy import client as client_mod
+    from voxxy import config as config_mod
+
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('api_key_ref = "op://DeLoSecrets/host/credential"\n')
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", cfg)
+    monkeypatch.delenv("VOX_API_KEY", raising=False)
+    monkeypatch.delenv("VOX_API_KEY_REF", raising=False)
+    monkeypatch.setattr(subprocess, "run",
+                        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=f"key-for:{argv[-1]}", stderr=""))
+    monkeypatch.setattr(client_mod, "_REF_CACHE", {})
+    assert client_mod.env_api_key() == "key-for:op://DeLoSecrets/host/credential"

@@ -72,6 +72,10 @@ class Config:
     # Named destination for audio when this shell has no speakers of its own
     # (ssh session, zellij pane, systemd unit). None = always play locally.
     default_sink: Optional[str] = None
+    # This host's Voxxy API key, as an op:// reference (never the value). Used when
+    # neither $VOX_API_KEY nor $VOX_API_KEY_REF is set: systemd units, hooks, the
+    # HeyMa tray. `heyma setup` writes it.
+    api_key_ref: Optional[str] = None
     # `voxxy speak --persona` / `voxxy persona rewrite` call an OpenAI-compatible
     # chat endpoint directly. The key is never stored raw: persona_api_key_ref is
     # an op:// reference resolved with `op read` at call time.
@@ -111,6 +115,7 @@ def load_config() -> Config:
         default_url=raw.get("default_url", defaults.default_url),
         default_voice=raw.get("default_voice", defaults.default_voice),
         default_sink=raw.get("default_sink") or None,
+        api_key_ref=raw.get("api_key_ref") or None,
         persona_base_url=raw.get("persona_base_url") or DEFAULT_PERSONA_BASE_URL,
         persona_model=raw.get("persona_model") or DEFAULT_PERSONA_MODEL,
         persona_api_key_ref=raw.get("persona_api_key_ref") or None,
@@ -139,6 +144,8 @@ def save_config(cfg: Config) -> None:
     }
     if cfg.default_sink:
         data["default_sink"] = cfg.default_sink
+    if cfg.api_key_ref:
+        data["api_key_ref"] = cfg.api_key_ref
     if cfg.persona_base_url != DEFAULT_PERSONA_BASE_URL:
         data["persona_base_url"] = cfg.persona_base_url
     if cfg.persona_model != DEFAULT_PERSONA_MODEL:

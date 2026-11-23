@@ -34,7 +34,7 @@ _REF_CACHE: dict[str, str | None] = {}
 
 
 def env_api_key(environ: Optional[dict] = None) -> str | None:
-    """The caller's Voxxy key: $VOX_API_KEY, else $VOX_API_KEY_REF read with `op read`.
+    """The caller's Voxxy key: $VOX_API_KEY, else $VOX_API_KEY_REF, else config `api_key_ref` (op read).
 
     A ref (op://DeLoSecrets/...) is what services and host config carry, so no
     key is ever written to a file. Read once per process; a failed read is None
@@ -45,6 +45,14 @@ def env_api_key(environ: Optional[dict] = None) -> str | None:
     if direct:
         return direct
     ref = (env.get("VOX_API_KEY_REF") or "").strip()
+    if not ref and environ is None:
+        # Last, this host's config.toml `api_key_ref` (what `heyma setup` writes).
+        try:
+            from voxxy.config import load_config
+
+            ref = (load_config().api_key_ref or "").strip()
+        except Exception:  # noqa: BLE001 - an unreadable config means "no key", never a crash
+            ref = ""
     if not ref:
         return None
     if ref not in _REF_CACHE:
