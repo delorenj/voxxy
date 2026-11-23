@@ -8,9 +8,14 @@ from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+# The web app: the shell at "/" and every static asset under this prefix are public, since the page
+# is what asks for the key. The data routes it calls stay protected.
+PUBLIC_STATIC_PREFIX = "/ui/"
+
 PUBLIC_EXACT_PATHS = frozenset({
     "/",
     "/healthz",
+    "/app-config",
     "/install.sh",
     "/bin/vox-speak",
 })
@@ -42,6 +47,8 @@ def is_public_request(method: str, path: str) -> bool:
     if normalized in PUBLIC_EXACT_PATHS:
         return True
     if normalized.startswith("/audio/") and normalized.endswith(".ogg"):
+        return True
+    if path.startswith(PUBLIC_STATIC_PREFIX):
         return True
     # Listening on a sink is read-only: the stream carries /audio URLs, which are
     # already public. Desk listeners (a Mac's `voxxy listen`, HeyMa's speak-here

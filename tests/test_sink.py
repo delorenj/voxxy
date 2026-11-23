@@ -107,11 +107,13 @@ def test_sse_comment_is_a_comment() -> None:
 
 # ---------------------------------------------------------------- auth posture
 
-def test_sink_routes_are_not_public() -> None:
-    """The relay reaches the human's speakers; it must sit behind VOX_API_KEY."""
-    assert not is_public_request("GET", "/sink/delo-macbook/events")
-    assert not is_public_request("GET", "/sink/delo-macbook")
+def test_sink_listening_is_public_but_sending_is_not() -> None:
+    """Listening is read-only (desk listeners need no key); sending reaches the speakers."""
+    assert is_public_request("GET", "/sink/delo-macbook/events")
+    assert is_public_request("GET", "/sink/delo-macbook")
     assert not is_public_request("POST", "/sink/delo-macbook/play")
+    assert not is_public_request("POST", "/sink/delo-macbook/say")
+    assert not is_public_request("GET", "/sink/delo-macbook/play")
 
 
 # ---------------------------------------------------------------- round-trip

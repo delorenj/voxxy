@@ -61,6 +61,40 @@ def to_ogg_opus(audio_bytes: bytes, *, input_format: str | None = None) -> bytes
     return proc.stdout
 
 
+def to_wav_mono_file(path: str, *, sample_rate: int = 24_000) -> bytes:
+    """Like ``to_wav_mono`` but reads a file, which ffmpeg can seek (an MP4 with its moov atom at
+    the end yields no frames from a pipe)."""
+    cmd = [
+        _ffmpeg_bin(), "-hide_banner", "-loglevel", "error",
+        "-i", path,
+        "-ar", str(sample_rate), "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav",
+        "pipe:1",
+    ]
+    proc = subprocess.run(cmd, capture_output=True, check=False)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"ffmpeg failed (rc={proc.returncode}): {stderr}")
+    return proc.stdout
+
+
+def to_wav_mono(audio_bytes: bytes, *, sample_rate: int = 24_000) -> bytes:
+    """Decode any ffmpeg-readable audio (a browser's webm/opus or mp4/aac recording) to mono PCM WAV.
+
+    soundfile cannot read those containers, so voice registration falls back to this.
+    """
+    cmd = [
+        _ffmpeg_bin(), "-hide_banner", "-loglevel", "error",
+        "-i", "pipe:0",
+        "-ar", str(sample_rate), "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav",
+        "pipe:1",
+    ]
+    proc = subprocess.run(cmd, input=audio_bytes, capture_output=True, check=False)
+    if proc.returncode != 0:
+        stderr = proc.stderr.decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"ffmpeg failed (rc={proc.returncode}): {stderr}")
+    return proc.stdout
+
+
 # OpenAI `response_format` -> (ffmpeg output args, Content-Type). ``wav`` is what the engines already
 # produce, so it only goes through ffmpeg when a speed change is asked for.
 OPENAI_FORMATS: dict[str, tuple[list[str], str]] = {

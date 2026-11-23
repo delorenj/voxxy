@@ -3,6 +3,7 @@
 - HTTP API: POST /synthesize → audio/wav  (engine chain, returns winning bytes)
 - HTTP API: POST /synthesize-url → JSON   (engine fallback + URL return)
 - HTTP API: POST /v1/audio/speech → audio  (OpenAI-compatible; GET /v1/models)
+- Web app: GET / (shell) and /ui/... (static assets), GET /app-config (edition + auth flags)
 - Audio cache: GET /audio/{id}.ogg        (Telegram-ready OGG/Opus)
 - Sink relay: /sink/{key}/...             (play on the human's machine, not the caller's)
 - MCP at /mcp/ (streamable HTTP) for Hermes/OpenClaw/Claude Code
@@ -22,6 +23,9 @@ Environment:
   VOX_AUDIO_TTL_SECONDS  cache lifetime (default: 3600)
   VOX_ENGINES          comma-separated name=url pairs for remote engine sidecars
   VOX_API_KEY          optional shared key protecting HTTP/MCP data-plane routes
+  VOX_EDITION          "hosted" (default, strict: own voice or described voices only) or
+                       "self" (operator's own responsibility; the web app offers clip upload)
+  VOX_DESIGN_ENGINE    engine that makes described voices (default: voxcpm)
   VOX_DEFAULT_SINK     default sink name for the speak_sink MCP tool (optional)
   VOX_REF_AUDIO_MAX_SECONDS  max reference audio length kept on upload (default 30)
   VOX_REQUEST_REF_MAX_BYTES / _MAX_SECONDS / _MIN_SECONDS  per-request clip
@@ -37,10 +41,14 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import json
 import os
+import re
 import shutil
 import tempfile
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -48,11 +56,15 @@ import soundfile as sf
 from fastapi import FastAPI, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from fastmcp import FastMCP
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import audio as audio_codec
-from app.auth import ApiKeyAuthMiddleware
+from app import consent as consent_mod
+from app import edition as edition_mod
+from app import voices as voices_mod
+from app.auth import ApiKeyAuthMiddleware, resolve_api_key_from_env
 from app import cache as audio_cache
 from app import sink as sink_relay
 from app.engines import (
@@ -552,6 +564,72 @@ async def healthz():
     return {"status": "ok" if overall else "degraded", "engines": engines}
 
 
+# ---------- web app ----------
+#
+# A static single-page app served by the core itself: no build step, no CDN, no npm. The shell is
+# GET / and its assets live under /ui/ (both public in app/auth.py; the page asks for the API key).
+# GET /app-config tells the page which edition it is talking to.
+
+WEB_DIR = Path(__file__).parent / "web"
+
+
+class _NoCacheStatic(StaticFiles):
+    """Static files that always revalidate (ETag still saves the bytes), so a deploy shows at once."""
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _public_base_url(request: Request) -> str:
+    configured = os.environ.get("VOX_PUBLIC_BASE_URL", "").strip()
+    if configured:
+        return configured.rstrip("/")
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+@app.get("/", include_in_schema=False)
+async def web_shell() -> FileResponse:
+    """The Voxxy web app shell."""
+    index = WEB_DIR / "index.html"
+    if not index.is_file():
+        raise HTTPException(404, "web app not bundled in this image")
+    return FileResponse(
+        index, media_type="text/html; charset=utf-8",
+        headers={"Cache-Control": "no-cache", "X-Content-Type-Options": "nosniff"},
+    )
+
+
+@app.get("/app-config")
+async def app_config(request: Request) -> dict:
+    """What the web app needs to know before it asks for anything: edition and whether a key is needed.
+
+    Public. Never carries a secret: ``auth_required`` only says whether ``VOX_API_KEY`` is set.
+    """
+    edition = edition_mod.current_edition()
+    hosted = edition == edition_mod.EDITION_HOSTED
+    return {
+        "edition": edition,
+        "auth_required": resolve_api_key_from_env() is not None,
+        "public_base_url": _public_base_url(request),
+        "features": {
+            "own_voice": True,
+            "describe_voice": True,
+            "upload_clip": not hosted,   # the web app offers upload only in the self edition
+            "real_name_check": hosted,
+            "consent_verification": False,  # ASR + speaker match are story G5
+            "sink": True,
+        },
+    }
+
+
+if (WEB_DIR / "ui").is_dir():
+    app.mount("/ui", _NoCacheStatic(directory=WEB_DIR / "ui"), name="ui")
+
+
 # ---------- client installer ----------
 #
 # The service hosts its own CLI distribution so new workstations can bootstrap
@@ -935,6 +1013,108 @@ async def get_voice(name: str) -> VoiceOut:
     return VoiceOut.from_model(v)
 
 
+# ---------- voice registration (shared by upload, design and own-voice) ----------
+
+VOICE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
+UPLOAD_MAX_BYTES = 25 * 1024 * 1024
+OWN_MIN_SECONDS = 8.0       # the browser enforces 8 s; the server allows 0.5 s of timer jitter
+OWN_MIN_SECONDS_SLACK = 0.5
+OWN_MAX_SECONDS = 60.0      # the UI stops at 30 s and REF_AUDIO_MAX_SECONDS trims what is kept
+DESIGN_DEFAULT_SAMPLE = (
+    "Hello, this is my voice. I can read you a short story, answer a question, "
+    "or just say good morning."
+)
+DESIGN_CFG = 2.0
+DESIGN_STEPS = 10
+TAG_OWN = "own"
+TAG_DESIGNED = "designed"
+TAG_UNVERIFIED = "unverified-consent"
+
+_challenges = consent_mod.ChallengeStore()
+
+
+def _store_voice_wav(src_path: str, name: str) -> tuple[Path, float]:
+    """Trim a reference clip to REF_AUDIO_MAX_SECONDS, downmix to mono, write ``<name>.wav``.
+
+    ``src_path`` is any file soundfile can read. Returns the destination and the kept duration.
+    """
+    dest = voices_mod.VOICES_DIR / f"{name}.wav"
+    if dest.resolve().parent != voices_mod.VOICES_DIR.resolve():
+        raise HTTPException(422, "invalid voice name")
+    info = sf.info(src_path)
+    frames = int(min(info.duration, REF_AUDIO_MAX_SECONDS) * info.samplerate)
+    data, sr = sf.read(src_path, frames=frames)
+    if data.ndim == 2:
+        data = data.mean(axis=1)
+    sf.write(dest, data, sr, subtype="PCM_16")
+    return dest, min(info.duration, REF_AUDIO_MAX_SECONDS)
+
+
+async def _register_voice_file(
+    *, name: str, display_name: str, src_path: str, source_label: Optional[str],
+    prompt_text: Optional[str], tags: list[str],
+) -> Voice:
+    """Store a clip as the voice ``name`` and upsert its profile. One path for every way in."""
+    assert _repo is not None
+    dest, duration = _store_voice_wav(src_path, name)
+    return await _repo.upsert(
+        name=name, display_name=display_name, wav_path=dest.name,
+        duration_s=duration, source_path=source_label,
+        prompt_text=prompt_text, tags=tags,
+        # Auto-populate per-engine ref for zero-friction onboarding. Operators
+        # can later POST a different clip per engine if they want engine-specific
+        # tuning; the default here means "same clip for everyone".
+        vibevoice_ref_path=dest.name,
+        vibevoice_speaker_tag=None,  # reserved for future multi-speaker
+    )
+
+
+async def _register_voice_bytes(
+    *, name: str, display_name: str, audio: bytes, suffix: str, source_label: Optional[str],
+    prompt_text: Optional[str], tags: list[str],
+) -> Voice:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(audio)
+        src_tmp = tmp.name
+    try:
+        return await _register_voice_file(
+            name=name, display_name=display_name, src_path=src_tmp,
+            source_label=source_label, prompt_text=prompt_text, tags=tags,
+        )
+    finally:
+        Path(src_tmp).unlink(missing_ok=True)
+
+
+def _voice_slug(raw: str) -> str:
+    """A voice name that is safe as a filename and a URL part (the field is lowercase, 1-48 chars)."""
+    slug = raw.strip()
+    if not VOICE_SLUG_RE.match(slug):
+        raise HTTPException(
+            422,
+            "name must be 1-48 characters: lowercase letters, digits, '-' or '_', starting with a letter or digit",
+        )
+    return slug
+
+
+async def _require_name_free(name: str, own_tag: str) -> None:
+    """A new voice may replace only an earlier voice of the same kind, never someone else's name.
+
+    POST /voices (the fleet's upload) still replaces freely; the web flows must not be a way to
+    overwrite a house voice or a fleet voice by typing its name.
+    """
+    assert _repo is not None
+    existing = await _repo.get(name)
+    if existing is not None and own_tag not in existing.tags:
+        raise HTTPException(409, f"a voice named '{name}' already exists; choose another name")
+
+
+async def _read_upload(audio: UploadFile) -> bytes:
+    data = await audio.read(UPLOAD_MAX_BYTES + 1)
+    if len(data) > UPLOAD_MAX_BYTES:
+        raise HTTPException(413, "recording is too large; keep it under 30 seconds")
+    return data
+
+
 @app.post("/voices", response_model=VoiceOut)
 async def create_voice(
     name: str = Form(..., description="Slug used as the API key, e.g. 'rick'"),
@@ -952,31 +1132,273 @@ async def create_voice(
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=Path(audio.filename or "up").suffix) as tmp:
         shutil.copyfileobj(audio.file, tmp)
-        src_tmp = tmp.name
+        raw_tmp = tmp.name
+    # One decode path for every way in: m4a/webm/mp4 go through ffmpeg like the web flows do.
+    src_tmp, _ = await _readable_wav_path(raw_tmp)
 
     try:
-        info = sf.info(src_tmp)
-        frames = int(min(info.duration, REF_AUDIO_MAX_SECONDS) * info.samplerate)
-        data, sr = sf.read(src_tmp, frames=frames)
-        if data.ndim == 2:
-            data = data.mean(axis=1)
-        dest = VOICES_DIR / f"{name}.wav"
-        sf.write(dest, data, sr, subtype="PCM_16")
-        duration = min(info.duration, REF_AUDIO_MAX_SECONDS)
+        tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
+        v = await _register_voice_file(
+            name=name, display_name=display_name, src_path=src_tmp,
+            source_label=audio.filename, prompt_text=prompt_text, tags=tag_list,
+        )
     finally:
         Path(src_tmp).unlink(missing_ok=True)
+    return VoiceOut.from_model(v)
 
-    tag_list = [t.strip() for t in (tags or "").split(",") if t.strip()]
-    v = await _repo.upsert(
-        name=name, display_name=display_name, wav_path=dest.name,
-        duration_s=duration, source_path=audio.filename,
-        prompt_text=prompt_text, tags=tag_list,
-        # Auto-populate per-engine ref for zero-friction onboarding. Operators
-        # can later POST a different clip per engine if they want engine-specific
-        # tuning; the default here means "same clip for everyone".
-        vibevoice_ref_path=dest.name,
-        vibevoice_speaker_tag=None,  # reserved for future multi-speaker
+
+# ---------- describe a voice (POST /voices/design) ----------
+
+def _tidy_text(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return None
+    # Parentheses delimit the description in the engine prompt; keep them out of the text.
+    v = re.sub(r"[()\r\n]+", " ", v)
+    return re.sub(r"\s+", " ", v).strip() or None
+
+
+def _strip_str(v: Any) -> Any:
+    return v.strip() if isinstance(v, str) else v
+
+
+def _tidy_description(v: Optional[str]) -> str:
+    out = _tidy_text(v)
+    if out is None or len(out) < 8:
+        raise ValueError("describe the voice: age, pace, tone, accent")
+    return out
+
+
+class VoiceDesignIn(BaseModel):
+    name: str = Field(..., description="Slug for the new voice, e.g. 'calm-narrator'")
+    display_name: str = Field(..., min_length=1, max_length=80)
+    description: str = Field(
+        ..., min_length=8, max_length=400,
+        description="The voice itself: age, pace, tone, accent. No names of real people.",
     )
+    sample_text: Optional[str] = Field(
+        None, max_length=400,
+        description="What the reference clip says; kept as the voice's prompt_text.",
+    )
+    seed: Optional[int] = Field(None, ge=0, le=2**31 - 1)
+
+    _strip_name = field_validator("display_name", mode="before")(_strip_str)
+    _tidy_desc = field_validator("description")(_tidy_description)
+    _tidy_sample = field_validator("sample_text")(_tidy_text)
+
+
+class VoiceDesignPreviewIn(BaseModel):
+    description: str = Field(..., min_length=8, max_length=400)
+    sample_text: Optional[str] = Field(None, max_length=400)
+    seed: Optional[int] = Field(None, ge=0, le=2**31 - 1)
+
+    _tidy_desc = field_validator("description")(_tidy_description)
+    _tidy_sample = field_validator("sample_text")(_tidy_text)
+
+
+def _check_description_allowed(description: str, *, action: str) -> None:
+    """Hosted edition: refuse a description that names a real person (422, logged)."""
+    if not edition_mod.is_hosted():
+        return
+    reason = edition_mod.refuse_real_person(description)
+    if reason is not None:
+        logger.warning("voice design refused (%s, hosted edition): %r", action, description[:120])
+        raise HTTPException(
+            422, reason, headers={"X-Vox-Error": "real_person_description"},
+        )
+
+
+def _design_engines() -> list[str]:
+    return [os.environ.get("VOX_DESIGN_ENGINE", "voxcpm").strip() or "voxcpm"]
+
+
+def _design_text(description: str, sample_text: Optional[str]) -> str:
+    """The VoxCPM2 "Voice Design" prompt: the description in parentheses, then what is said.
+
+    Same shape as house-voices/build.py: no reference audio, so the engine invents the voice.
+    """
+    return f"({description}){sample_text or DESIGN_DEFAULT_SAMPLE}"
+
+
+@app.post("/voices/design/preview", response_model=SynthesizeUrlResponse)
+async def preview_designed_voice(
+    req: VoiceDesignPreviewIn, request: Request, response: Response,
+) -> SynthesizeUrlResponse:
+    """Hear a description before keeping it. Same refusal rule as ``POST /voices/design``;
+    nothing is stored except the short-lived audio cache entry."""
+    _check_description_allowed(req.description, action="preview")
+    try:
+        resp = await _synthesize_and_cache(
+            text=_design_text(req.description, req.sample_text), voice_name=None,
+            cfg=DESIGN_CFG, steps=DESIGN_STEPS, request=request,
+            engines=_design_engines(), seed=req.seed,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _http_error(exc, what="voice_design_preview") from exc
+    response.headers["X-Vox-Engine"] = resp.engine
+    return resp
+
+
+@app.post("/voices/design", response_model=VoiceOut)
+async def design_voice(req: VoiceDesignIn) -> VoiceOut:
+    """Make a voice from a description, with no recording of anyone.
+
+    Does what ``house-voices/build.py`` does: synthesize ``"(" + description + ")" + sample`` with
+    no reference audio, then register the result like ``POST /voices`` (shared helper). Tagged
+    ``designed``. In the hosted edition a description that seems to name a real person is
+    refused with 422 (see app/edition.py) and the refusal is logged.
+    """
+    assert _repo is not None
+    name = _voice_slug(req.name)
+    _check_description_allowed(req.description, action="design")
+    await _require_name_free(name, TAG_DESIGNED)
+    sample = req.sample_text or DESIGN_DEFAULT_SAMPLE
+    try:
+        result = await _synthesize_wav(
+            text=_design_text(req.description, sample), voice_name=None,
+            cfg=DESIGN_CFG, steps=DESIGN_STEPS, engines=_design_engines(), seed=req.seed,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise _http_error(exc, what="voice_design") from exc
+    v = await _register_voice_bytes(
+        name=name, display_name=req.display_name.strip(), audio=result.wav_bytes, suffix=".wav",
+        source_label="voice-design", prompt_text=sample, tags=[TAG_DESIGNED],
+    )
+    return VoiceOut.from_model(v)
+
+
+# ---------- record your own voice (consent challenge + live upload) ----------
+
+class ConsentChallengeOut(BaseModel):
+    challenge_id: str
+    sentence: str
+    code: str
+    expires_at: str  # ISO 8601, UTC
+    record_min_seconds: float = OWN_MIN_SECONDS
+    record_max_seconds: float = REF_AUDIO_MAX_SECONDS
+
+
+@app.post("/voices/consent/challenge", response_model=ConsentChallengeOut)
+async def consent_challenge() -> ConsentChallengeOut:
+    """Issue a single-use sentence and code to read aloud. Valid for 10 minutes.
+
+    The store is in memory (app/consent.py): a restart drops open challenges.
+    """
+    challenge = _challenges.issue()
+    return ConsentChallengeOut(
+        challenge_id=challenge.challenge_id,
+        sentence=challenge.sentence,
+        code=challenge.code,
+        expires_at=datetime.fromtimestamp(challenge.expires_at, tz=timezone.utc).isoformat(),
+    )
+
+
+def _challenge_http_error(exc: consent_mod.ChallengeError) -> HTTPException:
+    status = 404 if exc.kind == "unknown" else 410
+    return HTTPException(status, str(exc), headers={"X-Vox-Error": f"challenge_{exc.kind}"})
+
+
+async def _readable_wav_path(path: str) -> tuple[str, bool]:
+    """``path`` itself when soundfile reads it; otherwise a converted temp WAV (ffmpeg, reading the
+    file, not a pipe, so an MP4 with its moov atom at the end still decodes). ``path`` is deleted
+    when converted. Returns (path, is_converted); the caller deletes the result."""
+    try:
+        sf.info(path)
+        return path, False
+    except Exception:  # noqa: BLE001 - not a format soundfile reads; try ffmpeg
+        pass
+    converted: Optional[str] = None
+    try:
+        wav = await asyncio.to_thread(audio_codec.to_wav_mono_file, path)
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            tmp.write(wav)
+            converted = tmp.name
+        if float(sf.info(converted).duration) <= 0:
+            raise ValueError("decoded to zero length")
+    except Exception:  # noqa: BLE001
+        Path(path).unlink(missing_ok=True)
+        if converted:
+            Path(converted).unlink(missing_ok=True)
+        raise HTTPException(422, "could not read that recording; record again or try another browser") from None
+    Path(path).unlink(missing_ok=True)
+    return converted, True
+
+
+async def _as_readable_wav(data: bytes, suffix: str) -> tuple[str, bool]:
+    """A temp path soundfile can read. Browsers record webm/mp4, which libsndfile cannot decode,
+    so those go through ffmpeg. Returns (path, is_converted); the caller deletes the file."""
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".bin") as tmp:
+        tmp.write(data)
+        path = tmp.name
+    return await _readable_wav_path(path)
+
+
+@app.post("/voices/own", response_model=VoiceOut)
+async def create_own_voice(
+    challenge_id: str = Form(...),
+    name: str = Form(..., description="Slug for the new voice, e.g. 'my-voice'"),
+    display_name: str = Form(..., min_length=1, max_length=80),
+    audio: UploadFile = File(..., description="A live recording of the challenge sentence"),
+) -> VoiceOut:
+    """Add the caller's own voice from a live browser recording read against a challenge.
+
+    Checks the challenge is valid, unused and unexpired, that the recording is at least 8 s, then
+    stores the voice tagged ``own`` and ``unverified-consent`` with a ``<name>.consent.json``
+    sidecar (challenge id, sentence, code, times, status).
+
+    NOT VERIFIED YET: v1 does not check that the audio says the sentence and code (ASR), nor that
+    the voice matches a reference clip (speaker embedding). That is story G5; until it lands
+    the ``unverified-consent`` tag is the truth about these voices.
+    """
+    assert _repo is not None
+    slug = _voice_slug(name)
+    display_name = display_name.strip()
+    if not display_name:
+        raise HTTPException(422, "give the voice a display name")
+    try:
+        _challenges.check(challenge_id)
+    except consent_mod.ChallengeError as exc:
+        raise _challenge_http_error(exc) from exc
+    await _require_name_free(slug, TAG_OWN)
+
+    data = await _read_upload(audio)
+    if not data:
+        raise HTTPException(422, "the recording is empty; record again")
+    src, _ = await _as_readable_wav(data, Path(audio.filename or "rec").suffix)
+    try:
+        duration = float(sf.info(src).duration)
+        if duration < OWN_MIN_SECONDS - OWN_MIN_SECONDS_SLACK:
+            raise HTTPException(
+                422, f"the recording is {duration:.1f} s; read the whole sentence, at least {OWN_MIN_SECONDS:.0f} seconds",
+            )
+        if duration > OWN_MAX_SECONDS:
+            raise HTTPException(422, f"the recording is {duration:.0f} s; keep it under {REF_AUDIO_MAX_SECONDS:.0f} seconds")
+        try:
+            redeemed = _challenges.redeem(challenge_id)  # the single use happens here
+        except consent_mod.ChallengeError as exc:
+            raise _challenge_http_error(exc) from exc
+        v = await _register_voice_file(
+            name=slug, display_name=display_name, src_path=src,
+            source_label="own-voice-recording", prompt_text=None, tags=[TAG_OWN, TAG_UNVERIFIED],
+        )
+    finally:
+        Path(src).unlink(missing_ok=True)
+
+    sidecar = voices_mod.VOICES_DIR / f"{slug}.consent.json"
+    sidecar.write_text(json.dumps({
+        "voice": slug,
+        "consent": TAG_UNVERIFIED,
+        "challenge_id": redeemed.challenge_id,
+        "sentence": redeemed.sentence,
+        "code": redeemed.code,
+        "challenge_issued_at": redeemed.issued_at,
+        "recording_received_at": redeemed.redeemed_at,
+        "recording_seconds": round(duration, 2),
+        "checks": {"asr_transcript": "not_run", "speaker_match": "not_run"},
+    }, indent=2) + "\n")
     return VoiceOut.from_model(v)
 
 
@@ -1009,6 +1431,7 @@ async def delete_voice(name: str):
     await _repo.delete(name)
     try:
         v.abs_path.unlink(missing_ok=True)
+        v.abs_path.with_name(f"{v.abs_path.stem}.consent.json").unlink(missing_ok=True)
     except Exception:
         pass
     return {"deleted": name}

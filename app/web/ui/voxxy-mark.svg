@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <title>Voxxy: a V of sound waves</title>
+  <!-- the V: two arms meeting at the source point (32,50) -->
+  <path d="M13 14 L32 50 L51 14" stroke="#c7e9b4" stroke-width="6"/>
+  <!-- broadcast arcs centred on the source point, inside the arms -->
+  <path d="M28.38 36.48 A14 14 0 0 1 35.62 36.48" stroke="#ffffff" stroke-width="4"/>
+  <path d="M25.79 26.82 A24 24 0 0 1 38.21 26.82" stroke="#ffffff" stroke-width="4"/>
+  <path d="M23.20 17.16 A34 34 0 0 1 40.80 17.16" stroke="#ffffff" stroke-width="4"/>
+</svg>

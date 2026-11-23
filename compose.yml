@@ -16,6 +16,11 @@ services:
       VOX_REF_AUDIO_MAX_SECONDS: "30"
       VOX_API_KEY: ${VOX_API_KEY:-}
       VOX_DEFAULT_VOICE: ${VOX_DEFAULT_VOICE:-rick}
+      # Which edition the web app and voice-making routes serve. "hosted"
+      # (default) makes only own-voice and described voices and refuses
+      # descriptions of real people. "self" also allows uploading a clip.
+      # Unknown values fall back to hosted.
+      VOX_EDITION: ${VOX_EDITION:-hosted}
       # Default destination for the speak_sink MCP tool, so a fleet agent can
       # reach whoever is listening without knowing the sink name. Empty means
       # callers must pass one explicitly.
