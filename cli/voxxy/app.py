@@ -16,6 +16,7 @@ from voxxy.commands import daemon as daemon_commands
 from voxxy.commands import engine as engine_commands
 from voxxy.commands import listen as listen_commands
 from voxxy.commands import persona as persona_commands
+from voxxy.commands import setup as setup_commands
 from voxxy.commands import speak as speak_commands
 from voxxy.commands import util as util_commands
 from voxxy.commands import voice as voice_commands
@@ -66,6 +67,7 @@ def _root(
 util_commands.register(app)
 speak_commands.register(app)
 listen_commands.register(app)
+setup_commands.register(app)
 
 # Engine, voice, and daemon commands.
 engine_commands.register(engine_app)
