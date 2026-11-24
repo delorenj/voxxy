@@ -451,8 +451,15 @@ Tests: store 83 pass (8 new Voxxy tests, a generic checkout-gates test); build, 
 and live checks pass. To open self-hosted: operator terms page (G7) at a URL for `terms.url`, the
 Stripe link with terms acceptance and billing country (N12, N14, N15) for `checkoutSelfhosted.link`,
 the go-live ticket pattern in the `voxxy` policy entry, then products.json `on-sale` with the $49
-offer in the same change. When self-hosted goes on sale the product-level sign-up disappears, so the
-hosted waitlist needs a per-edition sign-up first (not built).
+offer in the same change, setting the `selfhosted` edition on sale in `editions`.
+
+Per-edition waitlist built and deployed 2026-11-23 (store `f9d5225`). The catalog lists Voxxy's
+`selfhosted` and `hosted` editions, each with its own status and offer, and each preview edition keeps
+its own sign-up list (`voxxy-selfhosted`, `voxxy-hosted`) through the same form-intake path. While
+both are previews the form asks which; once self-hosted opens, the page keeps a hosted-only sign-up
+("Get one email when Voxxy hosted goes on sale") with an outlined jump link next to Buy, and
+`notify-guard` owes the launch email only to the self-hosted list. Tests build the page with the
+self-hosted gate on and check the hosted sign-up stays, and with both on that it is gone.
 
 ### The questions as originally asked
 
