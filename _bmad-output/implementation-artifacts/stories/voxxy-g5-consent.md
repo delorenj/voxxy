@@ -1,6 +1,6 @@
 # Story: G5 consent check
 
-Status: built, spike-calibrated, review findings fixed; tested, NOT deployed (the orchestrator applies migration 004, recreates the container and commits)
+Status: deployed 2026-11-24 (commit 19a1277; migration 004 applied; consent models preloaded). VOX_OPERATOR_KEY is commented out in .env.template until the vault item exists, so the review queue answers 503.
 Pillar: `belsky-doctrine`
 Calibration: `_bmad-output/implementation-artifacts/stories/voxxy-g5-spike.md` (the numbers below are its recommendations)
 Decision source: `_bmad-output/planning-artifacts/voxxy-heyma-integration-scope.md` (Q4: own voice only in the hosted edition, with voice fingerprinting)
