@@ -352,7 +352,7 @@ in the second column.
 | G7 | Terms drafts: hosted terms, acceptable use, self-hosted operator terms, takedown and report path, privacy facts. Adapt Gruvato's drafts. Jarad approves every clause | voxxy (drafts), store (published pages) | 2 |
 | G8 | `.launch.yaml` in Voxxy (`mode: launch`, `live:` block when live) so it joins Holocene's Live shelf; a Voxxy go-live ticket on its board | voxxy | 0.5 |
 | G9 | Store: `/voxxy/` page, two checkout gates, policy entry, privacy section, thanks pages, index card, guide. All gates off until authorized | automaticai-store | 3 |
-| G10 | Store issuer: per-product catalog entry so Earshot and Voxxy share one issuer. Earshot's behavior must not change | automaticai-store (move from earshot) | 1 |
+| G10 | Store issuer: per-product catalog entry so Earshot and Voxxy share one issuer. Earshot's behavior must not change. **Built 2026-11-23** (store `40d9a91`, earshot `fd9a9cc`): `licensing/issuer.py` in the store with `PRODUCTS`; Earshot unchanged (byte-for-byte golden, its 68 tests pass, real ledgers read identically); Voxxy entry refuses live issuance until its link and signing key exist | automaticai-store (move from earshot) | 1 |
 | G11 | Stripe webhook to admin API for hosted subscriptions | voxxy | 2 |
 | G12 | HeyMa: the Voxxy adapter and tray row (V1), the "HeyMa family" tag in the store listing, then a local pre-check that uses Wax's registry to pick a clean own-voice window and test the match before upload | HeyMa | 2 for V1, later for the rest |
 
@@ -422,6 +422,18 @@ license offline (soft: it always runs) and `voxxy license import` adds one. Park
 license signing key (until it exists every key reads invalid), the N11 move of personas and
 `voice_clone` out of the public repo, and a real GPU install on a buyer-like machine. The build is
 product-agnostic, so G10's issuer and any later self-hosted product reuse it.
+
+G10 built 2026-11-23 (store `40d9a91`, earshot `fd9a9cc`). The Earshot issuer moved to the store
+as `licensing/issuer.py`, with one catalog entry per product (`PRODUCTS`); Earshot's
+`scripts/licensing/issuer.py` now runs it, so Earshot's runbook, scripts and tests are unchanged.
+Regression checks: the store reproduces a token and ledger made by Earshot's pre-move issuer byte for
+byte, Earshot's 68 licensing tests pass against it, and both versions read the real Earshot ledgers
+to the same result. The Voxxy entry signs `VS1` keys with `selfhost-12m` and a signed
+`updates_until` (issue date + 365 days) at $49; its tokens verify with Voxxy's `app/license.py`.
+It has no live payment link and no signing key, so live issuance refuses before any vault read.
+To sell: create the signing key (vault item; public key into both the store's
+`VOXXY_TRUSTED_PUBLIC_KEYS` and Voxxy's `TRUSTED_PUBLIC_KEYS`), then the Stripe product and link
+(N14), then pin them in a private approved catalog.
 
 ### The questions as originally asked
 

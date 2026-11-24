@@ -65,7 +65,7 @@ shape, so one issuer (G10) can sign both.
 
 ## Next
 
-- G10: generalise the Earshot issuer to a per-product catalog in the store repo, so it mints VS1
-  keys too (Earshot's behaviour unchanged).
+- G10: done 2026-11-23 (store `40d9a91`, earshot `fd9a9cc`). The store's shared issuer has a
+  Voxxy entry that mints VS1 keys once the signing key and payment link exist.
 - Wire the release step: bump `[bundle] version`, build, publish the tarball to the delivery
   location the store's thanks page points at.
