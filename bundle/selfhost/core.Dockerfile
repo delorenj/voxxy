@@ -28,6 +28,8 @@ RUN uv sync --frozen --no-install-project
 ENV PATH="/opt/venv/bin:${PATH}"
 
 COPY app /app/app
+# When this release came out, for the license's 12 months of updates (written by the bundle build).
+COPY RELEASE.json /app/RELEASE.json
 
 EXPOSE 8000
 

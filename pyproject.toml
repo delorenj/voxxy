@@ -15,6 +15,8 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "sherpa-onnx>=2.0.3",
     "numpy>=2.4.4",
+    # Ed25519 for the self-hosted license check (app/license.py).
+    "cryptography>=46",
 ]
 
 [tool.uv]

@@ -39,6 +39,7 @@ Environment:
                        _MIN_REFERENCE_SPEECH  seconds of speech required (6 / 8)
   VOX_CONSENT_PRELOAD  load the consent models at startup (default 1)
   VOX_TERMS_VERSION    terms version stored on each consent record (default draft-1)
+  VOX_LICENSE_FILE     self edition: the VS1 license key file (default /data/license/license.txt)
   ELEVENLABS_API_KEY   enables the ElevenLabs fallback engine (optional)
   ELEVENLABS_DEFAULT_VOICE  default ElevenLabs voice id (default: Adam)
 """
@@ -71,6 +72,7 @@ from app import audio as audio_codec
 from app import consent as consent_mod
 from app import consent_store as consent_store_mod
 from app import edition as edition_mod
+from app import license as license_mod
 from app import voices as voices_mod
 from app.auth import (
     ApiKeyAuthMiddleware,
@@ -571,6 +573,9 @@ async def lifespan(app: FastAPI):
 
     _sweep_task = asyncio.create_task(audio_cache.sweep_loop())
 
+    if not edition_mod.is_hosted():
+        lic = license_mod.current()
+        logger.info("license: %s (%s)", lic.state, lic.detail)
     logger.info(
         "vox-tts core ready: voices_dir=%s audio_cache=%s ref_cap=%.0fs engines=%s",
         VOICES_DIR, audio_cache.AUDIO_CACHE_DIR, REF_AUDIO_MAX_SECONDS,
@@ -698,7 +703,38 @@ async def app_config(request: Request) -> dict:
             "version": edition_mod.CONSENT_RELEASE_VERSION,
             "text": edition_mod.CONSENT_RELEASE_TEXT,
         } if hosted else None,
+        # the self-hosted license state (soft: Voxxy runs either way); the hosted edition has none
+        "license": None if hosted else _license_public(license_mod.current()),
     }
+
+
+def _license_public(status: "license_mod.LicenseStatus") -> dict:
+    """What anyone may see about the license: its state and dates, never the key or the buyer."""
+    return {"state": status.state, "detail": status.detail, "updates_until": status.updates_until}
+
+
+class LicenseIn(BaseModel):
+    key: str
+
+
+@app.get("/license")
+async def get_license() -> dict:
+    """The self-hosted license: state, reason, license id and dates (API key required)."""
+    if edition_mod.is_hosted():
+        raise HTTPException(404, "The hosted edition has no license key.")
+    return license_mod.current().as_dict()
+
+
+@app.post("/license")
+async def put_license(body: LicenseIn) -> dict:
+    """Add or replace the license key. It is checked first; an invalid key is refused (422) and not saved."""
+    if edition_mod.is_hosted():
+        raise HTTPException(404, "The hosted edition has no license key.")
+    status = license_mod.store(body.key)
+    if status.state not in (license_mod.STATE_VALID, license_mod.STATE_UPDATES_ENDED):
+        raise HTTPException(422, status.detail, headers={"X-Vox-Error": f"license_{status.state}"})
+    logger.info("license replaced: %s", status.state)
+    return status.as_dict()
 
 
 if (WEB_DIR / "ui").is_dir():

@@ -17,6 +17,9 @@ edition = "self"
 # Bump with each release a buyer can download. Buyers get 12 months of versions (N3).
 version = "0.1.0"
 out_dir = "dist/bundle"
+# Files the build writes with {version, released_at}; the license check compares released_at
+# with the buyer's updates_until.
+release_files = ["core/RELEASE.json"]
 
 # ---------------------------------------------------------------- what ships
 
@@ -148,4 +151,4 @@ fleet_slug_text_allow = ["david", "sean", "penny", "chaya", "damian", "dumply", 
 
 # The bundled CLI must not offer these commands.
 cli_commands_absent = ["persona", "voice clone"]
-cli_commands_present = ["speak", "voice candidates", "voice add", "setup", "health"]
+cli_commands_present = ["speak", "voice candidates", "voice add", "setup", "health", "license show", "license import"]

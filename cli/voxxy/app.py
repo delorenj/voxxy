@@ -16,6 +16,7 @@ from voxxy import _bundle
 from voxxy.commands import consent as consent_commands
 from voxxy.commands import daemon as daemon_commands
 from voxxy.commands import engine as engine_commands
+from voxxy.commands import license as license_commands
 from voxxy.commands import listen as listen_commands
 from voxxy.commands import setup as setup_commands
 from voxxy.commands import speak as speak_commands
@@ -37,12 +38,14 @@ voice_app = typer.Typer(help=(
 ))
 sink_app = typer.Typer(help="Sink relay: route audio to the machine you're at.")
 consent_app = typer.Typer(help="Consent review queue (operator key): reviews, approve, reject, audio.")
+license_app = typer.Typer(help="Self-hosted license key: show, import.")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(engine_app, name="engine")
 app.add_typer(voice_app, name="voice")
 app.add_typer(sink_app, name="sink")
 app.add_typer(consent_app, name="consent")
+app.add_typer(license_app, name="license")
 
 
 @app.callback()
@@ -77,6 +80,7 @@ setup_commands.register(app)
 engine_commands.register(engine_app)
 voice_commands.register(voice_app)
 consent_commands.register(consent_app)
+license_commands.register(license_app)
 listen_commands.register_sink(sink_app)
 daemon_commands.register(daemon_app)
 

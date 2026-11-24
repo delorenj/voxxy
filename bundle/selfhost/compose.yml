@@ -56,6 +56,7 @@ services:
       - ./data/voices:/data/voices
       - ./data/audio-cache:/data/audio-cache
       - ./data/models:/data/models
+      - ./data/license:/data/license
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
       interval: 30s

@@ -94,6 +94,12 @@ code="$(curl -s -o "$STATE/synth.wav" -w '%{http_code}' -H "X-API-Key: $KEY" -H 
   || miss "synthesis answered $code"
 edition="$(curl -fsS "$BASE/app-config" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("edition"))' 2>/dev/null)"
 [[ "$edition" == self ]] && pass "edition: self" || miss "edition: $edition"
+lstate="$(curl -fsS "$BASE/app-config" | python3 -c 'import json,sys; print((json.load(sys.stdin).get("license") or {}).get("state"))' 2>/dev/null)"
+[[ "$lstate" == missing ]] && pass "license: missing (Voxxy runs without one)" || miss "license state: $lstate"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H "X-API-Key: $KEY" -H 'content-type: application/json' \
+  -d '{"key":"VS1.not.real"}' "$BASE/license")"
+[[ "$code" == 422 ]] && pass "a bad license key is refused (422)" || miss "bad license key answered $code"
+[[ -f core/RELEASE.json ]] && pass "release stamp: $(cat core/RELEASE.json)" || miss "core/RELEASE.json missing"
 
 echo "bundled CLI in its own venv"
 VENV="$STATE/cli-venv"; rm -rf "$VENV"
@@ -104,6 +110,8 @@ if run_cli setup --url "$BASE" --key-ref "file:$BUNDLE/.env#VOX_API_KEY" --no-sp
   pass "voxxy setup accepted the file: key reference"
 else miss "voxxy setup failed ($STATE/cli-setup.json)"; fi
 run_cli voice list --json 2>/dev/null | grep -q '"house-f1"' && pass "voxxy voice list sees house-f1" || miss "voxxy voice list"
+run_cli license show >/dev/null 2>&1; rc=$?
+(( rc == 2 )) && pass "voxxy license show: no key (exit 2)" || miss "voxxy license show exited $rc"
 
 if [[ "${KEEP:-0}" == 1 ]]; then
   echo "KEEP=1: stack left running at $BASE (cd $BUNDLE; COMPOSE_PROJECT_NAME=$PROJECT COMPOSE_FILE=$COMPOSE_FILE docker compose down -v)"

@@ -51,13 +51,24 @@ def repo_root(start: Path) -> Path:
         return start
 
 
-def git_info(root: Path) -> dict:
+def git_info(root: Path, sources: list[str]) -> dict:
+    """HEAD, and whether any path the bundle is built from has uncommitted changes (others do not matter)."""
     def run(*args: str) -> str:
         try:
             return subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
         except (OSError, subprocess.CalledProcessError):
             return ""
-    return {"commit": run("rev-parse", "HEAD"), "dirty": bool(run("status", "--porcelain", "--untracked-files=no"))}
+    return {"commit": run("rev-parse", "HEAD"), "dirty": bool(run("status", "--porcelain", "--", *sources))}
+
+
+def source_paths(manifest: dict, manifest_path: Path, root: Path) -> list[str]:
+    paths = [c["src"] for c in manifest.get("copy", [])]
+    if "voices" in manifest:
+        paths.append(manifest["voices"]["recipe"])
+    if "cli" in manifest:
+        paths.append(manifest["cli"]["project"])
+    paths.append(manifest_path.resolve().relative_to(root).as_posix())
+    return paths
 
 
 class Excluder:
@@ -228,9 +239,12 @@ def build(manifest_path: Path, out: Path | None = None, *, wheel: bool = True) -
     wheel_path = build_cli(root, stage, manifest["cli"], excluded) if wheel and "cli" in manifest else None
     (stage / "VERSION").write_text(b["version"] + "\n")
 
-    info = git_info(root)
+    info = git_info(root, source_paths(manifest, manifest_path, root))
     stamp = int(subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=root, capture_output=True, text=True)
                 .stdout.strip() or 0)
+    for rel in manifest.get("release_files", []):
+        # When this release came out (the source commit's time), read by the license check.
+        (stage / rel).write_text(json.dumps({"version": b["version"], "released_at": stamp}) + "\n")
     write_index(stage, {
         "name": b["name"], "product": b.get("product"), "edition": b.get("edition"), "version": b["version"],
         "commit": info["commit"], "dirty": info["dirty"],

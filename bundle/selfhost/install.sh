@@ -5,7 +5,8 @@
 #                           install the voxxy command
 #   ./install.sh --check    only check this machine; change nothing
 #
-# Options: --no-cli (skip the voxxy command), --no-start (write .env only), --yes (no prompts).
+# Options: --license KEY|FILE (add your license key), --no-cli (skip the voxxy command),
+#          --no-start (write .env only), --yes (no prompts).
 # Exit codes: 0 everything worked, 2 worked with warnings, 3 something failed.
 # Run it again at any time: it keeps your .env and your voices, and skips what is done.
 
@@ -14,14 +15,17 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE" || exit 3
 
-CHECK_ONLY=0 NO_CLI=0 NO_START=0
-for arg in "$@"; do
+CHECK_ONLY=0 NO_CLI=0 NO_START=0 LICENSE=""
+while (( $# )); do
+  arg="$1"; shift
   case "$arg" in
+    --license) LICENSE="${1:-}"; shift || true ;;
+    --license=*) LICENSE="${arg#--license=}" ;;
     --check) CHECK_ONLY=1 ;;
     --no-cli) NO_CLI=1 ;;
     --no-start) NO_START=1 ;;
     --yes|-y) ;;
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (see ./install.sh --help)" >&2; exit 3 ;;
   esac
 done
@@ -106,7 +110,7 @@ PORT="$(env_value VOXXY_PORT)"; PORT="${PORT:-8000}"
 BASE="http://127.0.0.1:${PORT}"
 API_KEY="$(env_value VOX_API_KEY)"
 [[ -n "$API_KEY" ]] || { fail ".env has no VOX_API_KEY"; finish; }
-mkdir -p data/voices data/audio-cache data/models
+mkdir -p data/voices data/audio-cache data/models data/license
 
 if (( NO_START )); then echo; echo "Settings written. Start Voxxy with: docker compose up -d --build"; finish; fi
 
@@ -137,7 +141,27 @@ while IFS=$'\t' read -r name display tags prompt; do
   else warn "could not add $name; run ./install.sh again once 'docker compose logs vox' looks healthy"; fi
 done < voices/voices.tsv
 
-# ---------------------------------------------------------------- 5. the voxxy command
+# ---------------------------------------------------------------- 5. license
+step "License"
+if [[ -n "$LICENSE" && -f "$LICENSE" ]]; then LICENSE="$(tr -d ' \n\r' < "$LICENSE")"; fi
+if [[ -n "$LICENSE" ]]; then
+  if [[ ! "$LICENSE" =~ ^VS1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$ ]]; then
+    warn "that does not look like a Voxxy license key (VS1....); add it later with: voxxy license import <key>"
+  else
+    answer="$(curl -s -w '\n%{http_code}' -H "X-API-Key: $API_KEY" -H 'content-type: application/json' \
+      -d "{\"key\":\"$LICENSE\"}" "$BASE/license")"
+    if [[ "${answer##*$'\n'}" == 200 ]]; then ok "license key added"
+    else warn "license key refused: ${answer%$'\n'*}"; fi
+  fi
+fi
+state="$(curl -fsS "$BASE/app-config" 2>/dev/null | grep -o '"state":"[a-z_]*"' | head -n 1 | cut -d'"' -f4)"
+case "$state" in
+  valid) ok "licensed" ;;
+  updates_ended) warn "licensed, but this version came out after your 12 months of updates" ;;
+  *) warn "no license key yet: Voxxy works, but add the key from your purchase email with: voxxy license import <key>" ;;
+esac
+
+# ---------------------------------------------------------------- 6. the voxxy command
 if (( ! NO_CLI )) && [[ -n "$CLI_TOOL" ]]; then
   step "The voxxy command"
   WHEEL="$(ls cli/voxxy-*.whl 2>/dev/null | head -n 1)"
@@ -153,7 +177,7 @@ if (( ! NO_CLI )) && [[ -n "$CLI_TOOL" ]]; then
   fi
 fi
 
-# ---------------------------------------------------------------- 6. engine
+# ---------------------------------------------------------------- 7. engine
 step "Speech engine"
 if curl -fsS "$BASE/healthz" 2>/dev/null | grep -q '"name":"voxcpm","ready":true'; then ok "VoxCPM2 is ready"
 else warn "VoxCPM2 is still loading (the first start downloads about 4.6 GB). Follow it with: docker compose logs -f engine-voxcpm"; fi

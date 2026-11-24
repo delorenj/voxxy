@@ -328,6 +328,14 @@ class VoxClient:
         """GET /consent/reviews/{id}/audio: the recording behind a record (``consent`` or ``reference``)."""
         return self._request("GET", f"/consent/reviews/{record_id}/audio", params={"which": which}).content
 
+    def license_status(self) -> dict:
+        """GET /license: the self-hosted license state, reason, id and dates (API key)."""
+        return self._request("GET", "/license").json()
+
+    def set_license(self, key: str) -> dict:
+        """POST /license: check and store a VS1 license key; an invalid key raises VoxValidationError (422)."""
+        return self._request("POST", "/license", json={"key": key}).json()
+
     def healthz(self) -> HealthResponse:
         """GET /healthz — returns overall status + per-engine readiness."""
         resp = self._request("GET", "/healthz")
