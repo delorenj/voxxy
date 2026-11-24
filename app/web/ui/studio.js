@@ -186,6 +186,8 @@ export function mountStudio(root, ctx) {
       pickerHost.replaceChildren(h("p", { class: "notice notice--error", role: "alert" }, `${explain(err)} You can still speak with the engine default.`));
       picker = { get: () => "", set() {} };
     });
+  // a voice approved (or removed) while this page is open shows up in the picker without a reload
+  cleanups.push(on("voices", (voices) => { if (!disposed && picker?.el) mountPicker(voices); }));
 
   if (sinkInput.value) checkDesk(true);
   const poll = setInterval(() => { if (!document.hidden && SINK_RE.test(sinkInput.value.trim())) checkDesk(true); }, 20000);

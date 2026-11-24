@@ -2,7 +2,7 @@
 
 import { h, toast, fmtSeconds } from "./dom.js";
 import { synth, deleteVoice, explain, kindOf, isPending, KIND_ORDER, KIND_LABEL, getVoice, setVoice } from "./api.js";
-import { state, loadVoices, invalidateVoices } from "./state.js";
+import { state, on, loadVoices, invalidateVoices } from "./state.js";
 import { tagEls } from "./picker.js";
 import { playUrl } from "./player.js";
 
@@ -173,6 +173,7 @@ export function mountVoices(root, ctx) {
 
   if (state.voices) paint();
   refresh();
+  const offVoices = on("voices", () => { if (!disposed) paint(); });
 
-  return () => { disposed = true; clearTimeout(t); stopPreview?.stop(); };
+  return () => { disposed = true; offVoices(); clearTimeout(t); stopPreview?.stop(); };
 }

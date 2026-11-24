@@ -94,7 +94,7 @@ function ownVoiceSaved(voice, onAgain) {
     return savedPanel({
       ...base, usable: false,
       title: `“${voice.display_name}” is saved and waiting for a quick check`,
-      note: "A person will listen to your recording before the voice can speak. You will see it in your library marked Under review, and it becomes available once it is approved.",
+      note: "A person will listen to your recording before the voice can speak. You will see it in your library marked Under review. Keep this page open and it tells you when the voice is approved.",
     });
   }
   if (result.state === "unchecked") {
@@ -277,6 +277,7 @@ function recordPath({ done, edition }) {
       try {
         const voice = await saveOwnVoice(fd);
         invalidateVoices();
+        loadVoices(true).catch(() => {}); // so the page notices when a voice under review is approved
         clearInterval(expiryTimer);
         done(ownVoiceSaved(voice, () => done(null)));
       } catch (err) {

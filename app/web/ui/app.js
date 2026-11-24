@@ -2,7 +2,7 @@
 
 import { h, clear, toast } from "./dom.js";
 import { getKey, setKey, forgetKey, listVoices, events, explain, ApiError } from "./api.js";
-import { state, on, loadConfig, invalidateVoices, startHealthPolling } from "./state.js";
+import { state, on, loadConfig, invalidateVoices, startHealthPolling, startReviewWatch } from "./state.js";
 import { mountStudio } from "./studio.js";
 import { mountVoices } from "./voices.js";
 import { mountMake } from "./make.js";
@@ -94,6 +94,12 @@ keyForget.addEventListener("click", () => {
 // A deploy replaced the web app while this page was open: old code can disagree with the new server
 // (it may not know a step the server now asks for), so say so and offer a reload. Not automatic: the
 // person may be halfway through a recording.
+on("reviewed", ({ display, approved }) => {
+  toast(approved
+    ? `“${display}” was approved. It can speak now.`
+    : `“${display}” was not approved, so it was removed from your library.`, approved ? "info" : "error", 12000);
+});
+
 on("stale", () => {
   if (document.getElementById("update-banner")) return;
   const reload = h("button", { class: "btn btn--primary", type: "button" }, "Reload");
@@ -193,7 +199,7 @@ window.addEventListener("hashchange", route);
 
 function enterApp() {
   setBodyState("app");
-  if (!started) { started = true; startHealthPolling(); }
+  if (!started) { started = true; startHealthPolling(); startReviewWatch(); }
   paintKeyStatus();
   route();
 }

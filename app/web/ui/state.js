@@ -1,6 +1,6 @@
 // Shared app state: the config the server gave, the voice list, and engine health.
 
-import { getConfig, getHealth, listVoices } from "./api.js";
+import { getConfig, getHealth, listVoices, isPending } from "./api.js";
 
 export const state = {
   config: null,
@@ -29,10 +29,34 @@ export function loadVoices(force = false) {
   if (!force && state.voices) return Promise.resolve(state.voices);
   if (!voicesInflight) {
     voicesInflight = listVoices()
-      .then((list) => { state.voices = Array.isArray(list) ? list : []; emit("voices", state.voices); return state.voices; })
+      .then((list) => { state.voices = Array.isArray(list) ? list : []; noteReviews(state.voices); emit("voices", state.voices); return state.voices; })
       .finally(() => { voicesInflight = null; });
   }
   return voicesInflight;
+}
+
+// Voices under review that this page has seen, name -> display name. When one is no longer pending the
+// page says so ("reviewed"): approved if it is still there, not approved if it is gone.
+let underReview = null;
+function noteReviews(voices) {
+  const now = new Map(voices.filter((v) => isPending(v)).map((v) => [v.name, v.display_name || v.name]));
+  if (underReview) {
+    for (const [name, display] of underReview) {
+      if (now.has(name)) continue;
+      const voice = voices.find((v) => v.name === name);
+      emit("reviewed", { name, display, approved: Boolean(voice) });
+    }
+  }
+  underReview = now;
+}
+
+// While any voice is under review, re-check the list (every 30 s while the tab is visible, and as soon
+// as it is shown again), so a voice approved by the operator turns usable without a reload.
+export function startReviewWatch(ms = 30000) {
+  const check = () => { if (!document.hidden && underReview?.size) loadVoices(true).catch(() => {}); };
+  const id = setInterval(check, ms);
+  document.addEventListener("visibilitychange", check);
+  return () => { clearInterval(id); document.removeEventListener("visibilitychange", check); };
 }
 
 export function invalidateVoices() {
