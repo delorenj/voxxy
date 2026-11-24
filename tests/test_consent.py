@@ -122,26 +122,40 @@ T = Thresholds()   # the spike's bars: accept 0.70, reject 0.10, sentence 0.80 /
     (dict(phrase=1.0, code="ok", reference=0.5, account=0.9), REVIEW, consent_mod.REASON_SPEAKER_UNSURE),
     (dict(phrase=1.0, code="ok", reference=0.9, account=0.5), REVIEW, consent_mod.REASON_SPEAKER_UNSURE),
     (dict(phrase=1.0, code="ok", reference=None, account=None, model_changed=True), REVIEW, consent_mod.REASON_MODEL_CHANGED),
+    (dict(phrase=1.0, code="ok", reference=0.9, account=None, first_voice=True), REVIEW, consent_mod.REASON_FIRST_VOICE),
+    (dict(phrase=1.0, code="ok", reference=None, account=None, first_voice=True), REVIEW, consent_mod.REASON_FIRST_VOICE),
+    (dict(phrase=1.0, code="missing", reference=None, account=None, first_voice=True), REJECTED, consent_mod.REASON_CODE),
+    (dict(phrase=1.0, code="ok", reference=0.05, account=None, first_voice=True), REJECTED,
+     consent_mod.REASON_REFERENCE_MISMATCH),                                         # refusals still refuse
 ])
+
 def test_decide(kw, decision, reason) -> None:
     got = decide(t=T, **kw)
     assert (got.decision, got.reason) == (decision, reason)
 
 
+def test_first_voice_rule_can_be_switched_off() -> None:
+    t = Thresholds(review_first_voice=False)
+    assert decide(phrase=1.0, code="ok", reference=None, account=None, first_voice=True, t=t).decision == ACCEPTED
+
+
 def test_rejection_reasons_are_plain_and_never_accusatory() -> None:
     for text in (consent_mod.REASON_PHRASE, consent_mod.REASON_CODE, consent_mod.REASON_REFERENCE_MISMATCH,
                  consent_mod.REASON_ACCOUNT_MISMATCH, consent_mod.REASON_ASR_UNSURE, consent_mod.REASON_SPEAKER_UNSURE,
-                 consent_mod.REASON_SPEECH, consent_mod.REASON_REFERENCE_SPEECH, consent_mod.REASON_CHALLENGE_USED,
+                 consent_mod.REASON_SPEECH, consent_mod.REASON_FIRST_VOICE, consent_mod.REASON_REFERENCE_SPEECH, consent_mod.REASON_CHALLENGE_USED,
                  consent_mod.REASON_VOICE_UNCHECKED):
         assert not any(w in text.lower() for w in ("fake", "fraud", "cheat", "impersonat", "stole", "suspicious", "liar"))
 
 
 def test_thresholds_default_to_the_spikes_numbers_and_come_from_env(monkeypatch) -> None:
     for var in ("VOX_CONSENT_ACCEPT", "VOX_CONSENT_REJECT", "VOX_CONSENT_PHRASE_OK", "VOX_CONSENT_PHRASE_REVIEW",
-                "VOX_CONSENT_MIN_SPEECH", "VOX_CONSENT_MIN_REFERENCE_SPEECH"):
+                "VOX_CONSENT_MIN_SPEECH", "VOX_CONSENT_MIN_REFERENCE_SPEECH", "VOX_CONSENT_REVIEW_FIRST"):
         monkeypatch.delenv(var, raising=False)
-    # TitaNet-large raw cosine: accept 0.70, refuse below 0.10; sentence 0.80 / 0.50; 6 s / 8 s of speech
-    assert Thresholds.from_env() == Thresholds(0.70, 0.10, 0.80, 0.50, 6.0, 8.0)
+    # TitaNet-large raw cosine: accept 0.70, refuse below 0.10; sentence 0.80 / 0.50; 6 s / 8 s of speech;
+    # a hosted account's first voice goes to a person
+    assert Thresholds.from_env() == Thresholds(0.70, 0.10, 0.80, 0.50, 6.0, 8.0, True)
+    monkeypatch.setenv("VOX_CONSENT_REVIEW_FIRST", "off")
+    assert Thresholds.from_env().review_first_voice is False
     monkeypatch.setenv("VOX_CONSENT_ACCEPT", "0.75")
     monkeypatch.setenv("VOX_CONSENT_REJECT", "0.2")
     monkeypatch.setenv("VOX_CONSENT_PHRASE_OK", "not-a-number")
@@ -435,6 +449,32 @@ def _review_env(env, make_wav, monkeypatch, *, hz=330.0):
     assert _own(env, _challenge(env), make_wav, name="first").status_code == 200
     assert _own(env, _challenge(env), make_wav, name="second", hz=hz).status_code == 200
     return {"X-API-Key": "op-key"}
+
+
+def test_hosted_first_voice_waits_for_a_person_then_sets_the_voiceprint(env, make_wav, monkeypatch) -> None:
+    monkeypatch.setenv("VOX_CONSENT_REVIEW_FIRST", "1")
+    monkeypatch.setenv("VOX_OPERATOR_KEY", "op-key")
+    op = {"X-API-Key": "op-key"}
+    r = _own(env, _challenge(env), make_wav, name="first")
+    assert r.status_code == 200, r.text
+    assert consent_mod.public_tags(env.repo.voices["first"].tags) == ["own", "consent-pending"]
+    assert _records(env)[0].reason == consent_mod.REASON_FIRST_VOICE
+    assert "open" not in env.store.voiceprints and _speak(env, "first").status_code == 403
+    item = env.client.get("/consent/reviews", headers=op).json()[0]
+    assert env.client.post(f"/consent/reviews/{item['id']}", headers=op, json={"decision": "approve"}).status_code == 200
+    assert env.store.voiceprints["open"].source_record == item["id"] and _speak(env, "first").status_code == 200
+    # Once a person has vouched for the voiceprint, the same person's later voices pass on their own.
+    r = _own(env, _challenge(env), make_wav, name="second")
+    assert r.status_code == 200 and consent_mod.public_tags(env.repo.voices["second"].tags) == ["own", "consent-verified"]
+
+
+def test_hosted_first_voice_still_refuses_a_wrong_code(env, make_wav, monkeypatch) -> None:
+    monkeypatch.setenv("VOX_CONSENT_REVIEW_FIRST", "1")
+    ch = env.client.post("/voices/consent/challenge").json()
+    env.asr.say(ch, code=False)
+    r = _own(env, ch, make_wav, name="first")
+    assert r.status_code == 422 and _records(env)[0].reason == consent_mod.REASON_CODE
+    assert "first" not in env.repo.voices
 
 
 def test_review_routes_refuse_with_503_when_no_operator_key_is_configured(env) -> None:

@@ -37,3 +37,10 @@ def _wav(
 def make_wav():
     """``make_wav(seconds=2.0, sr=16000, channels=1, subtype="PCM_16", fmt="WAV", hz=220.0) -> bytes``."""
     return _wav
+
+
+@pytest.fixture(autouse=True)
+def _first_voice_rule_off_unless_a_test_turns_it_on(monkeypatch):
+    """Production reviews every hosted account's first voice (VOX_CONSENT_REVIEW_FIRST=1). Most consent tests
+    exercise the speaker rules behind it, so they run with it off; tests of the rule itself set it to 1."""
+    monkeypatch.setenv("VOX_CONSENT_REVIEW_FIRST", "0")

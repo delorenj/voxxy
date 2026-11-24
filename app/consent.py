@@ -235,6 +235,10 @@ class Thresholds:
     phrase_review: float = 0.50
     min_speech: float = 6.0
     min_reference_speech: float = 8.0
+    # Hosted: an account's first voice (the one that fixes its voiceprint) always goes to a person, whatever it
+    # scores. Nothing exists yet to compare it with, and a played-back clone reads the code and scores 0.87-0.90,
+    # so auto-accepting it would let the wrong person own the account (pricing decision N13, 2026-11-23).
+    review_first_voice: bool = True
 
     @classmethod
     def from_env(cls) -> "Thresholds":
@@ -251,6 +255,8 @@ class Thresholds:
             phrase_review=num("VOX_CONSENT_PHRASE_REVIEW", cls.phrase_review),
             min_speech=num("VOX_CONSENT_MIN_SPEECH", cls.min_speech),
             min_reference_speech=num("VOX_CONSENT_MIN_REFERENCE_SPEECH", cls.min_reference_speech),
+            review_first_voice=os.environ.get("VOX_CONSENT_REVIEW_FIRST", "1").strip().lower()
+            not in ("0", "false", "no", "off"),
         )
 
 
@@ -283,6 +289,9 @@ REASON_ACCOUNT_MISMATCH = (
 REASON_ASR_UNSURE = "We were not sure we heard every word, so a person will take a look at your recording."
 REASON_SPEAKER_UNSURE = "We could not tell for sure that the recordings match, so a person will take a look at your recording."
 REASON_MODEL_CHANGED = "This account's voiceprint was made by an older version of the check, so a person will take a look at your recording."
+REASON_FIRST_VOICE = (
+    "This is the first voice on your account, so a person will take a look at your recording before it is ready."
+)
 REASON_ACCEPTED = "Your recording matched the sentence, the code and your voice."
 REASON_UNAVAILABLE = "The consent check could not run."
 
@@ -295,13 +304,15 @@ class Decision:
 
 def decide(
     *, phrase: float, code: str, reference: float | None, account: float | None,
-    model_changed: bool = False, t: Thresholds,
+    model_changed: bool = False, t: Thresholds, first_voice: bool = False,
     consent_speech: float | None = None, reference_speech: float | None = None,
 ) -> Decision:
     """accepted / review / rejected from the numbers. Pure; every branch is unit-tested.
 
     ``consent_speech`` / ``reference_speech`` are seconds of speech found by the VAD (None = not measured).
     ``code`` is ``ok`` (within one edit of the code) or ``missing``.
+    ``first_voice``: the account has no voiceprint yet and this is hosted; with ``t.review_first_voice`` it
+    goes to review once every refusal check has passed.
     """
     if phrase < t.phrase_review:
         return Decision(REJECTED, REASON_PHRASE)
@@ -317,6 +328,8 @@ def decide(
         return Decision(REJECTED, REASON_ACCOUNT_MISMATCH)
     if model_changed:
         return Decision(REVIEW, REASON_MODEL_CHANGED)
+    if first_voice and t.review_first_voice:
+        return Decision(REVIEW, REASON_FIRST_VOICE)
     if phrase < t.phrase_ok:
         return Decision(REVIEW, REASON_ASR_UNSURE)
     if any(s < t.accept for s in (reference, account) if s is not None):
@@ -593,7 +606,7 @@ class ConsentGate:
                            warning=REASON_UNAVAILABLE)
 
         decision, reference_score, account_score = await self._score_and_decide(
-            principal, record_id, analysis, thresholds)
+            principal, record_id, analysis, thresholds, hosted=hosted)
         record.decision, record.reason = decision.decision, decision.reason
         record.transcript = analysis.transcript
         record.phrase_score = analysis.phrase_score
@@ -615,7 +628,7 @@ class ConsentGate:
         return Outcome(record, REJECTED, decision.reason, False, [], voice_audio)
 
     async def _score_and_decide(
-        self, principal: str, record_id: str, analysis: "_Analysis", t: Thresholds,
+        self, principal: str, record_id: str, analysis: "_Analysis", t: Thresholds, hosted: bool = True,
     ) -> tuple[Decision, Optional[float], Optional[float]]:
         """Score the clips against the account voiceprint and decide. When the decision is ACCEPTED on an
         account with no voiceprint, this attempt fixes it; if a concurrent attempt fixed it first, the
@@ -636,7 +649,7 @@ class ConsentGate:
             )
             decision = decide(
                 phrase=analysis.phrase_score, code=analysis.code, reference=reference_score,
-                account=account_score, model_changed=model_changed, t=t,
+                account=account_score, model_changed=model_changed, t=t, first_voice=hosted and stored is None,
                 consent_speech=analysis.consent_speech_s, reference_speech=analysis.reference_speech_s,
             )
             if decision.decision == ACCEPTED and stored is None:
