@@ -3,11 +3,11 @@
 -- only metadata + pointer live here.
 
 CREATE TABLE IF NOT EXISTS voices (
-    -- short slug used as the API key (e.g. "rick", "morty")
+    -- short slug used as the API key (e.g. "house-f1", "house-m1")
     name         text        PRIMARY KEY,
     -- human-readable display name
     display_name text        NOT NULL,
-    -- relative path under VOX_VOICES_DIR (e.g. "rick.wav")
+    -- relative path under VOX_VOICES_DIR (e.g. "house-f1.wav")
     wav_path     text        NOT NULL,
     -- original source path for provenance (optional)
     source_path  text,
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS voices (
     duration_s   real        NOT NULL,
     -- optional: default transcript for Ultimate Cloning mode
     prompt_text  text,
-    -- freeform tags for future filtering (e.g. {"rick", "cartoon", "male"})
+    -- freeform tags for future filtering (e.g. {"house", "synthetic", "male"})
     tags         text[]      NOT NULL DEFAULT '{}',
     -- optional ElevenLabs voice id for the fallback engine (NULL = default)
     elevenlabs_voice_id text,

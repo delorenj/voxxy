@@ -12,11 +12,11 @@ import sys
 
 import typer
 
+from voxxy import _bundle
 from voxxy.commands import consent as consent_commands
 from voxxy.commands import daemon as daemon_commands
 from voxxy.commands import engine as engine_commands
 from voxxy.commands import listen as listen_commands
-from voxxy.commands import persona as persona_commands
 from voxxy.commands import setup as setup_commands
 from voxxy.commands import speak as speak_commands
 from voxxy.commands import util as util_commands
@@ -31,16 +31,17 @@ app = typer.Typer(
 
 daemon_app = typer.Typer(help="Stack lifecycle: start, stop, status, install.")
 engine_app = typer.Typer(help="Engine control: list, use, enable, disable, logs.")
-voice_app = typer.Typer(help="Voice management: list, info, add, candidates, clone, isolate, delete, persona.")
+voice_app = typer.Typer(help=(
+    "Voice management: list, info, add, candidates, clone, isolate, delete, persona." if _bundle.FLEET
+    else "Voice management: list, info, add, candidates, isolate, delete."
+))
 sink_app = typer.Typer(help="Sink relay: route audio to the machine you're at.")
-persona_app = typer.Typer(help="Voice personas: list, show, dry-run rewrites, generate.")
 consent_app = typer.Typer(help="Consent review queue (operator key): reviews, approve, reject, audio.")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(engine_app, name="engine")
 app.add_typer(voice_app, name="voice")
 app.add_typer(sink_app, name="sink")
-app.add_typer(persona_app, name="persona")
 app.add_typer(consent_app, name="consent")
 
 
@@ -75,10 +76,17 @@ setup_commands.register(app)
 # Engine, voice, and daemon commands.
 engine_commands.register(engine_app)
 voice_commands.register(voice_app)
-persona_commands.register(persona_app)
 consent_commands.register(consent_app)
 listen_commands.register_sink(sink_app)
 daemon_commands.register(daemon_app)
+
+# Fleet-only commands. The self-hosted bundle ships without these modules (pricing doc N11).
+if _bundle.FLEET:
+    from voxxy.commands import persona as persona_commands
+
+    persona_app = typer.Typer(help="Voice personas: list, show, dry-run rewrites, generate.")
+    app.add_typer(persona_app, name="persona")
+    persona_commands.register(persona_app)
 
 
 def main() -> None:

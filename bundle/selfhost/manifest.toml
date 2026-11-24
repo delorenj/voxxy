@@ -1,0 +1,151 @@
+# The self-hosted Voxxy bundle: what ships, what never ships, and how it is checked.
+#
+# Build:  mise run bundle:build      (scripts/bundle/build.py bundle/selfhost/manifest.toml)
+# Check:  mise run bundle:check      (scripts/bundle/check.py, run by build too)
+#
+# The format is product-agnostic: any self-hosted AutomaticAI product can carry a manifest
+# like this one and use the same build and check scripts. Paths are relative to the repo
+# root; `dest` is relative to the bundle root.
+#
+# Contents follow the pricing doc (section 3.3 and N11): VoxCPM2 only, the four house
+# voices, no fleet, celebrity or character voices, no personas, no web-search clone flow.
+
+[bundle]
+name = "voxxy-selfhost"
+product = "voxxy"
+edition = "self"
+# Bump with each release a buyer can download. Buyers get 12 months of versions (N3).
+version = "0.1.0"
+out_dir = "dist/bundle"
+
+# ---------------------------------------------------------------- what ships
+
+[[copy]]
+src = "bundle/selfhost/README.md"
+dest = "README.md"
+
+[[copy]]
+src = "bundle/selfhost/install.sh"
+dest = "install.sh"
+mode = 0o755
+
+[[copy]]
+src = "bundle/selfhost/compose.yml"
+dest = "compose.yml"
+
+[[copy]]
+src = "bundle/selfhost/env.example"
+dest = "env.example"
+
+[[copy]]
+src = "bundle/selfhost/core.Dockerfile"
+dest = "core/Dockerfile"
+
+[[copy]]
+src = "app"
+dest = "core/app"
+
+[[copy]]
+src = "pyproject.toml"
+dest = "core/pyproject.toml"
+
+[[copy]]
+src = "uv.lock"
+dest = "core/uv.lock"
+
+[[copy]]
+src = "init.sql"
+dest = "db/000_init.sql"
+
+[[copy]]
+src = "migrations"
+dest = "db"
+
+[[copy]]
+src = "engines/voxcpm"
+dest = "engines/voxcpm"
+
+# Text replacements applied to copied files (glob on the bundle path), so the buyer's
+# build is reproducible: no floating image tags.
+[[rewrite]]
+glob = "**/Dockerfile"
+old = "ghcr.io/astral-sh/uv:latest"
+new = "ghcr.io/astral-sh/uv:0.13.6"
+
+# The house voices: synthetic, nobody's likeness. Each clip must match the sha256 that
+# house-voices/voices.toml records, and the build writes voices/voices.json for install.sh.
+[voices]
+recipe = "house-voices/voices.toml"
+clips_dir = "voices"
+dest = "voices"
+
+# The CLI ships as a wheel built from a pruned copy of cli/, with _bundle.py replaced.
+[cli]
+project = "cli"
+dest = "cli"
+prune = [
+  "voxxy/clone.py",
+  "voxxy/commands/voice_clone.py",
+  "voxxy/commands/persona.py",
+  "tests",
+  "dist",
+]
+# The `clone` extra (clip analysis for `voice add --auto` and `voice candidates`) loses yt-dlp.
+drop_dependencies = ["yt-dlp"]
+
+[cli.bundle_module]
+EDITION = "self"
+DEFAULT_URL = "http://127.0.0.1:8000"
+DEFAULT_VOICE = "house-f1"
+CLONE_INSTALL_HINT = "run ./install.sh again from your Voxxy folder (it installs the clip tools with uv)"
+
+# Files and directories never copied, wherever they appear.
+[exclude]
+names = ["__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "node_modules", ".DS_Store"]
+suffixes = [".pyc", ".pyo", ".bak", ".orig", ".log"]
+
+# ---------------------------------------------------------------- what never ships
+#
+# check.py fails the bundle if any of these appear. Fleet voice slugs and persona ids are
+# also read live from the repo (voices/, plugins/voice-persona/personas/), so a new fleet
+# voice is forbidden in the bundle the day it is added.
+
+[forbid]
+paths = [
+  "personas",
+  "voice-persona",
+  "voice_clone.py",
+  "voxxy/clone.py",
+  "_consent",
+  ".env",
+  "agents",
+  "_bmad",
+  "_bmad-output",
+]
+# Case-insensitive regexes searched in every text file (and inside the CLI wheel).
+strings = [
+  'delo\.sh',
+  'DeLoSecrets',
+  'big-chungus',
+  'burro-salmon',
+  'delorenj',
+  '(?-i:/home/[a-z])',
+  'code/voxxy',
+  'yt-dlp',
+  'yt_dlp',
+  'youtube',
+  'op://DeLo',
+  'sk-[A-Za-z0-9]{20,}',
+  'AKIA[0-9A-Z]{16}',
+  'BEGIN [A-Z ]*PRIVATE KEY',
+]
+# Fleet voice clips that share a slug with an ordinary word are matched as whole words only.
+fleet_voice_dirs = ["voices"]
+fleet_persona_dirs = ["plugins/voice-persona/personas"]
+fleet_voice_keep_prefix = "house-"
+# Slugs too common to search for as text (still forbidden as voice files).
+fleet_slug_text_allow = ["david", "sean", "penny", "chaya", "damian", "dumply", "bluey", "meg"]
+
+# The bundled CLI must not offer these commands.
+cli_commands_absent = ["persona", "voice clone"]
+cli_commands_present = ["speak", "voice candidates", "voice add", "setup", "health"]

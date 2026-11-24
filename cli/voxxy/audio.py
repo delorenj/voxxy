@@ -20,7 +20,7 @@ Design notes:
 - trim_seconds default matches the server's own REF_AUDIO_MAX_SECONDS (30), so
   `voice add` stops discarding reference audio the engine would have accepted.
   The previous 8.0 default silently clipped every uploaded voice to roughly a
-  quarter of the usable length, which is why `rick` -- uploaded through the API
+  quarter of the usable length, which is why a voice -- uploaded through the API
   before this CLI existed, and still the best-sounding voice in the repo --
   carries ~2x the actual speech of any voice added since.
 

@@ -33,8 +33,35 @@ _USE_ENV = object()
 _REF_CACHE: dict[str, str | None] = {}
 
 
+def _read_file_ref(ref: str) -> str | None:
+    """``file:<path>`` is the whole file; ``file:<path>#NAME`` is NAME's value in a dotenv file.
+
+    The self-hosted install points the CLI at the stack's own ``.env`` this way, so the
+    key lives in one file the installer wrote with mode 600, never in config.toml.
+    """
+    target, _, name = ref[len("file:"):].partition("#")
+    try:
+        text = Path(target).expanduser().read_text()
+    except OSError:
+        return None
+    if not name:
+        return text.strip() or None
+    for line in text.splitlines():
+        key, sep, value = line.strip().partition("=")
+        if sep and key.strip().removeprefix("export ").strip() == name:
+            return value.strip().strip("'\"") or None
+    return None
+
+
+def is_key_ref(ref: str) -> bool:
+    """A reference the CLI can resolve: ``op://...`` (1Password) or ``file:<path>[#NAME]``."""
+    return ref.startswith("op://") or ref.startswith("file:")
+
+
 def _resolve_ref(ref: str) -> str | None:
-    """``op read`` a 1Password reference once per process; a failed read is None."""
+    """Resolve a key reference once per process (``op read``, or a local file); a failed read is None."""
+    if ref.startswith("file:"):
+        return _read_file_ref(ref)
     if ref not in _REF_CACHE:
         import subprocess
 
@@ -51,7 +78,7 @@ def _resolve_ref(ref: str) -> str | None:
 def env_api_key(environ: Optional[dict] = None) -> str | None:
     """The caller's Voxxy key: $VOX_API_KEY, else $VOX_API_KEY_REF, else config `api_key_ref` (op read).
 
-    A ref (op://DeLoSecrets/...) is what services and host config carry, so no
+    A ref (op://<vault>/...) is what services and host config carry, so no
     key is ever written to a file. Read once per process; a failed read is None
     (the server then answers 401 and the caller names VOX_API_KEY).
     """

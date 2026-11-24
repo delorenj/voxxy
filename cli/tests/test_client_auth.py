@@ -133,3 +133,24 @@ def test_env_api_key_falls_back_to_the_config_ref(monkeypatch, tmp_path) -> None
                         lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout=f"key-for:{argv[-1]}", stderr=""))
     monkeypatch.setattr(client_mod, "_REF_CACHE", {})
     assert client_mod.env_api_key() == "key-for:op://DeLoSecrets/host/credential"
+
+
+# ---------- file: key references (the self-hosted install's .env) ----------
+
+def test_file_ref_reads_a_dotenv_value(tmp_path):
+    from voxxy.client import env_api_key
+
+    env_file = tmp_path / ".env"
+    env_file.write_text("# stack settings\nPOSTGRES_PASSWORD=pg\nexport VOX_API_KEY='abc123'\n")
+    assert env_api_key({"VOX_API_KEY_REF": f"file:{env_file}#VOX_API_KEY"}) == "abc123"
+
+
+def test_file_ref_reads_a_whole_file_and_misses_cleanly(tmp_path):
+    from voxxy.client import env_api_key, is_key_ref
+
+    key_file = tmp_path / "api-key"
+    key_file.write_text("xyz\n")
+    assert env_api_key({"VOX_API_KEY_REF": f"file:{key_file}"}) == "xyz"
+    assert env_api_key({"VOX_API_KEY_REF": f"file:{key_file}#NOPE"}) is None
+    assert env_api_key({"VOX_API_KEY_REF": f"file:{tmp_path / 'missing'}"}) is None
+    assert is_key_ref("file:/x") and is_key_ref("op://v/i/f") and not is_key_ref("abc123")

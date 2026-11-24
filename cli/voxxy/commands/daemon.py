@@ -24,6 +24,8 @@ Design notes:
 
 from __future__ import annotations
 
+from voxxy import _bundle
+
 import json
 import os
 import shutil
@@ -850,8 +852,8 @@ def daemon_install(
     else:
         cfg = Config(
             project_root=project_root,
-            default_url="https://vox.delo.sh",
-            default_voice="rick",
+            default_url=_bundle.DEFAULT_URL,
+            default_voice=_bundle.DEFAULT_VOICE,
         )
         save_config(cfg)
         _stderr(f"✓ wrote {CONFIG_PATH}")

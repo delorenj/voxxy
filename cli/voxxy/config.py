@@ -15,6 +15,8 @@ Design notes:
 
 from __future__ import annotations
 
+from voxxy import _bundle
+
 import os
 import tomllib
 from dataclasses import dataclass, field
@@ -67,8 +69,8 @@ class Config:
     """
 
     project_root: Optional[Path] = None
-    default_url: str = "https://vox.delo.sh"
-    default_voice: str = "rick"
+    default_url: str = _bundle.DEFAULT_URL
+    default_voice: str = _bundle.DEFAULT_VOICE
     # Named destination for audio when this shell has no speakers of its own
     # (ssh session, zellij pane, systemd unit). None = always play locally.
     default_sink: Optional[str] = None

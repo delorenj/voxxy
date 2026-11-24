@@ -15,6 +15,7 @@ from typer.testing import CliRunner
 import voxxy.clone as cl
 import voxxy.commands.persona as persona_cmd
 import voxxy.commands.voice as voice_cmd
+import voxxy.commands.voice_clip as clip_cmd
 import voxxy.commands.voice_clone as vc
 import voxxy.persona as bridge
 from voxxy import refclip as rc
@@ -132,7 +133,7 @@ def add_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         Path(dst).write_bytes(b"RIFFclean")
         return vc.PreparedClip(clip=Path(dst), start=start, end=end, prompt_text=prompt_text or "transcribed words")
 
-    monkeypatch.setattr(vc, "prepare_clip", fake_prepare)
+    monkeypatch.setattr(clip_cmd, "prepare_clip", fake_prepare)  # `voice add --auto` uses the clip tools
     calls.src = src
     return calls
 

@@ -1,8 +1,9 @@
 """Voice CRUD commands.
 
 `list`, `info`, `add`, `delete`, plus `persona` to associate a Hermes
-voice-persona character with a voice at the voxxy level. `candidates` and `clone`
-(the clean-reference-clip workflow) live in :mod:`voxxy.commands.voice_clone`.
+voice-persona character with a voice at the voxxy level (fleet only). `candidates` and
+`isolate` (the clean-reference-clip tools) live in :mod:`voxxy.commands.voice_clip`;
+`clone` (fleet only) in :mod:`voxxy.commands.voice_clone`.
 """
 
 from __future__ import annotations
@@ -28,7 +29,8 @@ from voxxy.audio import (
 )
 from voxxy import refclip
 from voxxy.client import VoxClient, VoxNotFound, VoxUnreachable, VoxValidationError
-from voxxy.commands import voice_clone
+from voxxy import _bundle
+from voxxy.commands import voice_clip
 from voxxy.config import load_config
 from voxxy.persona import (
     NONE_SENTINEL,
@@ -49,8 +51,12 @@ def register(voice_app: typer.Typer) -> None:
     voice_app.command("info")(voice_info)
     voice_app.command("add")(add)
     voice_app.command("delete")(delete)
-    voice_app.command("persona")(persona)
-    voice_clone.register(voice_app)
+    voice_clip.register(voice_app)
+    if _bundle.FLEET:  # fleet-only; the self-hosted bundle has no personas and no web-search clone (N11)
+        from voxxy.commands import voice_clone
+
+        voice_app.command("persona")(persona)
+        voice_clone.register(voice_app)
 
 
 def list_voices(
@@ -180,10 +186,10 @@ def persona(
 
     Examples:
 
-      voxxy voice persona peter                  # show current + effective
-      voxxy voice persona peter peter-griffin    # associate
-      voxxy voice persona peter none             # explicitly no persona
-      voxxy voice persona peter --clear          # back to frontmatter default
+      voxxy voice persona narrator                  # show current + effective
+      voxxy voice persona narrator narrator-calm    # associate
+      voxxy voice persona narrator none             # explicitly no persona
+      voxxy voice persona narrator --clear          # back to frontmatter default
     """
     if clear and persona_arg is not None:
         typer.secho("pass either PERSONA or --clear, not both", fg=typer.colors.RED, err=True)
@@ -290,9 +296,9 @@ def add(
 
     Examples:
 
-      voxxy voice add talk.mp3 --auto --name brian
-      voxxy voice add talk.mp3 --start 12.6 --end 26.1 --name brian
-      voxxy voice add clip.wav --name brian --prompt-text "exact words spoken in the clip"
+      voxxy voice add talk.mp3 --auto --name my-voice
+      voxxy voice add talk.mp3 --start 12.6 --end 26.1 --name my-voice
+      voxxy voice add clip.wav --name my-voice --prompt-text "exact words spoken in the clip"
     """
     # 1. Verify source path exists and is readable.
     if not path.exists():
@@ -474,7 +480,7 @@ def _clean_reference(
     """
     export_src = src
     if auto:
-        analysis = voice_clone.analyze_or_exit(src, min_seconds=min_seconds, max_seconds=max_seconds, isolate=isolate)
+        analysis = voice_clip.analyze_or_exit(src, min_seconds=min_seconds, max_seconds=max_seconds, isolate=isolate)
         best = analysis.top(1)
         if not best:
             typer.secho(
@@ -494,7 +500,7 @@ def _clean_reference(
         lo, hi, fallback = marker.start, marker.end, marker.text
     else:
         if isolate:
-            export_src = voice_clone.isolate_or_exit(src)
+            export_src = voice_clip.isolate_or_exit(src)
             console.print("[dim]vocals: isolated with Demucs[/dim]")
         lo = start if start is not None else 0.0
         hi = end if end is not None else lo + max_seconds
@@ -511,7 +517,7 @@ def _clean_reference(
         fallback = ""
         console.print(f"window: [cyan]{lo:.2f}-{hi:.2f}s[/cyan]")
     with console.status("[cyan]exporting and transcribing the clip[/cyan]"):
-        prepared = voice_clone.prepare_clip(export_src, dst, lo, hi, fallback_text=fallback, prompt_text=prompt_text)
+        prepared = voice_clip.prepare_clip(export_src, dst, lo, hi, fallback_text=fallback, prompt_text=prompt_text)
     console.print(f"prompt_text: [dim]{prepared.prompt_text}[/dim]")
     return prepared.prompt_text
 

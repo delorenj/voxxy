@@ -3,8 +3,8 @@
 The client role, which is what every desk needs (the server role is `voxxy
 daemon install`, on a GPU host only). It records, in ~/.config/voxxy/config.toml:
 
-- `default_url`: the Voxxy server (vox.delo.sh, or a self-hosted one);
-- `api_key_ref`: an op:// reference to this host's key (never the value);
+- `default_url`: the Voxxy server (the hosted one, or your own);
+- `api_key_ref`: an op:// or file:<path>[#NAME] reference to this host's key (never the value);
 
 then proves the pair works (health, then an authenticated voice list) and, with
 `--speak-here`, makes this desk a speaker (`voxxy sink on`).
@@ -24,7 +24,7 @@ from typing import Optional
 import typer
 from rich.console import Console
 
-from voxxy.client import VoxClient, VoxError, VoxUnauthorized, VoxUnreachable, env_api_key
+from voxxy.client import VoxClient, VoxError, VoxUnauthorized, VoxUnreachable, env_api_key, is_key_ref
 from voxxy.config import load_config, save_config
 
 console = Console(stderr=True)
@@ -36,9 +36,9 @@ def register(app: typer.Typer) -> None:
 
 def setup(
     url: Optional[str] = typer.Option(None, "-u", "--url",
-                                      help="Voxxy server. Default: the configured one (vox.delo.sh)."),
+                                      help="Voxxy server. Default: the configured one."),
     key_ref: Optional[str] = typer.Option(None, "--key-ref",
-                                          help="op:// reference to this host's API key. Default: keep the configured one."),
+                                          help="op:// or file:<path>[#NAME] reference to this host's API key. Default: keep the configured one."),
     speak_here: Optional[bool] = typer.Option(None, "--speak-here/--no-speak-here",
                                               help="Also make (or stop making) this desk a speaker. Default: leave as is."),
     json_out: bool = typer.Option(False, "--json", help="Emit one JSON report."),
@@ -66,8 +66,9 @@ def run_setup(url: Optional[str], key_ref: Optional[str], speak_here: Optional[b
     if url and url.rstrip("/") != cfg.default_url:
         cfg.default_url, changed = url.rstrip("/"), True
     if key_ref and key_ref != cfg.api_key_ref:
-        if not key_ref.startswith("op://"):
-            raise typer.BadParameter("--key-ref takes an op:// reference, never the key itself")
+        if not is_key_ref(key_ref):
+            raise typer.BadParameter(
+                "--key-ref takes an op:// or file:<path>[#NAME] reference, never the key itself")
         cfg.api_key_ref, changed = key_ref, True
     if changed:
         save_config(cfg)

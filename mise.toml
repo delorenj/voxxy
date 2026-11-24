@@ -218,3 +218,19 @@ if ! command -v voxxy >/dev/null 2>&1; then
 fi
 exec voxxy daemon install --completions
 '''
+
+# ---------------------------------------------------------------------------
+# Self-hosted bundle (G4). Manifest: bundle/selfhost/manifest.toml
+# ---------------------------------------------------------------------------
+
+[tasks."bundle:build"]
+description = "Build the self-hosted bundle into dist/bundle/ and check it (exit 0 ok, 2 warn, 3 fail)."
+run = "python3 scripts/bundle/build.py bundle/selfhost/manifest.toml"
+
+[tasks."bundle:check"]
+description = "Re-check the last built self-hosted bundle against the manifest."
+run = "python3 scripts/bundle/check.py dist/bundle/voxxy-selfhost-$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' bundle/selfhost/manifest.toml | head -n 1) --manifest bundle/selfhost/manifest.toml"
+
+[tasks."bundle:smoke"]
+description = "Install the built bundle for real in a scratch stack (fake engine, no GPU), verify, tear down."
+run = "scripts/bundle/smoke.sh"

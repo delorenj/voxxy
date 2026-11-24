@@ -1,7 +1,7 @@
 """Speaker-identity gate for reference-clip candidates: ECAPA embeddings, one voice per clip.
 
 The MFCC speaker map in :mod:`voxxy.refclip` only knows "the most talkative voice", and on a
-real scene compilation (Brian Griffin talking to Quagmire, Stewie, Peter, all voiced by one
+real scene compilation (one cartoon character talking to three others, all voiced by one
 actor) it reported a single speaker for every window. ECAPA (the same speaker model the
 vox-tts scoring harness grades clones with) separates them:
 

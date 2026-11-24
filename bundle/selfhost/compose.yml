@@ -1,0 +1,89 @@
+# Voxxy, self-hosted edition.
+#
+# Three containers: a database, the Voxxy service, and the VoxCPM2 speech engine on
+# your NVIDIA graphics card. install.sh writes .env next to this file and starts it;
+# after that, `docker compose up -d` and `docker compose down` from this directory.
+#
+# Settings live in .env (see env.example). The service listens on 127.0.0.1 only
+# unless you change VOXXY_BIND.
+
+name: voxxy
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: vox
+      POSTGRES_USER: voxxy
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?run install.sh first to set POSTGRES_PASSWORD}"
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      # Runs once, on the first start with an empty database, in file-name order.
+      - ./db:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U voxxy -d vox"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  vox:
+    build: ./core
+    image: voxxy-core:${VOXXY_VERSION:-local}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${VOXXY_BIND:-127.0.0.1}:${VOXXY_PORT:-8000}:8000"
+    environment:
+      VOX_DATABASE_URL: postgresql://voxxy:${POSTGRES_PASSWORD}@db:5432/vox
+      VOX_EDITION: self
+      VOX_API_KEY: "${VOX_API_KEY:?run install.sh first to set VOX_API_KEY}"
+      VOX_PUBLIC_BASE_URL: ${VOX_PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      VOX_ENGINES: voxcpm=http://engine-voxcpm:8000
+      VOX_DEFAULT_VOICE: ${VOX_DEFAULT_VOICE:-house-f1}
+      VOX_VOICES_DIR: /data/voices
+      VOX_AUDIO_CACHE_DIR: /data/audio-cache
+      VOX_AUDIO_TTL_SECONDS: "3600"
+      VOX_REF_AUDIO_MAX_SECONDS: "30"
+      VOX_MODELS_DIR: /data/models
+      # The own-voice check models download on first use instead of at every start.
+      VOX_CONSENT_PRELOAD: "0"
+      # Optional: an ElevenLabs fallback with your own key. Empty turns it off.
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+    volumes:
+      - ./data/voices:/data/voices
+      - ./data/audio-cache:/data/audio-cache
+      - ./data/models:/data/models
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  engine-voxcpm:
+    build: ./engines/voxcpm
+    image: voxxy-engine-voxcpm:${VOXXY_VERSION:-local}
+    restart: unless-stopped
+    environment:
+      HF_HOME: /cache/huggingface
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      VOX_REF_AUDIO_MAX_SECONDS: "30"
+      # torch.compile: faster, more graphics memory. Only on a card that runs nothing else.
+      VOX_OPTIMIZE: ${VOX_OPTIMIZE:-0}
+    volumes:
+      # The VoxCPM2 weights (about 4.6 GB) download here once from Hugging Face.
+      - hf-cache:/cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  db-data:
+  hf-cache:

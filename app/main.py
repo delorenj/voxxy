@@ -501,8 +501,8 @@ async def _synthesize_and_cache(
     elif request is not None:
         audio_url = str(request.url_for("get_audio", cache_id=cache_id))
     else:
-        # MCP callers go through here. Fall back to the well-known public URL.
-        audio_url = f"https://vox.delo.sh/audio/{cache_id}.ogg"
+        # MCP callers go through here. Set VOX_PUBLIC_BASE_URL to give them a reachable URL.
+        audio_url = f"http://127.0.0.1:8000/audio/{cache_id}.ogg"
 
     return SynthesizeUrlResponse(
         audio_url=audio_url,
@@ -708,7 +708,7 @@ if (WEB_DIR / "ui").is_dir():
 # ---------- client installer ----------
 #
 # The service hosts its own CLI distribution so new workstations can bootstrap
-# with one line: `curl -fsSL https://vox.delo.sh/install.sh | sh`. Single source
+# with one line: `curl -fsSL https://<voxxy-host>/install.sh | sh`. Single source
 # of truth (scripts/vox-speak in the repo), TLS-fronted via Traefik, no separate
 # hosting. `__BASE__` is substituted at request time so the installer pulls from
 # whatever origin served it (handy for local dev + prod on the same template).
@@ -756,7 +756,7 @@ async def install_sh(request: Request) -> Response:
     """Bootstrap installer: `curl -fsSL .../install.sh | sh`."""
     # Traefik terminates TLS upstream, so request.url.scheme is always "http"
     # inside the container. Honour X-Forwarded-Proto/Host so the installer
-    # advertises the client-facing URL (https://vox.delo.sh) rather than the
+    # advertises the client-facing URL rather than the
     # internal one.
     proto = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("x-forwarded-host") or request.url.netloc
@@ -1193,7 +1193,7 @@ async def _read_upload(audio: UploadFile) -> bytes:
 @app.post("/voices", response_model=VoiceOut)
 async def create_voice(
     request: Request,
-    name: str = Form(..., description="Slug used as the API key, e.g. 'rick'"),
+    name: str = Form(..., description="Slug used as the API key, e.g. 'house-f1'"),
     display_name: str = Form(...),
     prompt_text: Optional[str] = Form(None),
     tags: Optional[str] = Form(None, description="Comma-separated tags"),
@@ -1729,12 +1729,12 @@ async def delete_voice(name: str):
 # ---------- FastMCP tools ----------
 
 def _default_voice() -> Optional[str]:
-    """Resolve the default voice from env, falling back to 'rick'.
+    """Resolve the default voice from env, falling back to 'house-f1'.
 
     Set VOX_DEFAULT_VOICE in the container env to change the fleet default.
     Pass voice="" (empty string) to explicitly request voice-design mode.
     """
-    return os.environ.get("VOX_DEFAULT_VOICE", "rick")
+    return os.environ.get("VOX_DEFAULT_VOICE", "house-f1")
 
 
 @mcp.tool
@@ -1752,7 +1752,7 @@ async def speak(
     Args:
         text: What to say.
         voice: Name of a saved voice profile. Defaults to the service default
-            voice (rick). Pass empty string "" for voice-design mode.
+            voice. Pass empty string "" for voice-design mode.
         cfg: Classifier-free guidance scale (1.0-5.0).
         steps: Diffusion inference steps (higher = better quality, slower).
     """
@@ -1788,7 +1788,7 @@ async def speak_url(
     Args:
         text: What to say.
         voice: Name of a saved voice profile. Defaults to the service default
-            voice (rick). Pass empty string "" for voice-design mode.
+            voice. Pass empty string "" for voice-design mode.
         cfg: Classifier-free guidance scale (1.0-5.0).
         steps: Diffusion inference steps (higher = better quality, slower).
     """
@@ -1867,6 +1867,6 @@ async def list_voices_tool() -> list[dict]:
 
 
 # Mount FastMCP's streamable HTTP app at /mcp so clients can:
-#   hermes mcp add vox --url https://vox.delo.sh/mcp/
+#   hermes mcp add vox --url https://<voxxy-host>/mcp/
 # path="/" above means the MCP endpoint sits at the mount root, not /mcp/mcp.
 app.mount("/mcp", mcp_app)

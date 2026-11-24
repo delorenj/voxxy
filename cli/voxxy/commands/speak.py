@@ -58,6 +58,7 @@ from voxxy.client import (
     VoxUnreachable,
     VoxValidationError,
 )
+from voxxy import _bundle
 from voxxy.config import load_config
 # Re-exported (underscore names included) so `from voxxy.commands.speak import
 # _play_wav` keeps working for callers and tests written before the split.
@@ -88,7 +89,7 @@ def speak(
     ),
     voice: Optional[str] = typer.Option(
         None, "-v", "--voice",
-        help="Voice slug. Defaults to $VOX_VOICE or config.default_voice (rick).",
+        help="Voice slug. Defaults to $VOX_VOICE or config.default_voice.",
     ),
     url: Optional[str] = typer.Option(
         None, "-u", "--url",
@@ -125,7 +126,7 @@ def speak(
         help="Ignore any configured sink and play on this machine's speakers.",
     ),
     persona: Optional[str] = typer.Option(
-        None, "--persona", envvar="VOX_PERSONA",
+        None, "--persona", envvar="VOX_PERSONA", hidden=not _bundle.FLEET,
         help="Rewrite the text in a character's voice first: a persona ID, or 'auto' for "
              "the voice's own persona. Off by default (adds an LLM call); fail-open.",
     ),
@@ -137,13 +138,13 @@ def speak(
     Examples:
 
       voxxy speak "hello world"
-      voxxy speak -v rick "hello world"
+      voxxy speak -v house-f1 "hello world"
       echo "hi" | voxxy speak
       voxxy speak --raw "hi" > out.wav
-      voxxy speak --via big-chungus "hi"
+      voxxy speak --via desk-pc "hi"
       voxxy speak --out /tmp/voice.ogg "hi"
       voxxy speak --sink delo-macbook "hi"   # play on the machine at my desk
-      voxxy speak -v peter --persona auto "deploy done"   # in Peter's words
+      voxxy speak -v narrator --persona auto "deploy done"   # in the persona's words
     """
     # Resolve configuration with env overrides (env wins over config, flags win
     # over env). Matches the bash original's precedence.

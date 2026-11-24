@@ -123,7 +123,7 @@ class ChatLLM:
         raise self.error_cls(
             f"no {self.label} LLM key: set {names}, or put an op:// reference in "
             f"~/.config/voxxy/config.toml as {self.key_setting} "
-            f"(e.g. {self.key_setting} = \"op://DeLoSecrets/<item-uuid>/credential\")"
+            f"(e.g. {self.key_setting} = \"op://<vault>/<item>/credential\")"
         )
 
     def __call__(self, messages: list[dict], *, timeout: Optional[float] = None, temperature: float = 0.7) -> str:
@@ -231,7 +231,7 @@ class CloneLLM(ChatLLM):
         raise self.error_cls(
             "no clone LLM key: set VOXXY_CLONE_API_KEY (or VOXXY_PERSONA_API_KEY), or put an op:// "
             "reference in ~/.config/voxxy/config.toml as clone_api_key_ref "
-            "(e.g. clone_api_key_ref = \"op://DeLoSecrets/<item-uuid>/credential\")"
+            "(e.g. clone_api_key_ref = \"op://<vault>/<item>/credential\")"
         )
 
     def _timeout(self) -> float:

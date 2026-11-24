@@ -1,7 +1,7 @@
 """Demucs vocal-stem isolation for music-backed voice sources.
 
 Sources with wall-to-wall background music (documentaries, narrated explainers like
-Kurzgesagt, trailers, game cutscenes) fail :mod:`voxxy.refclip`'s background and pause
+explainer videos, trailers, game cutscenes) fail :mod:`voxxy.refclip`'s background and pause
 gates on every window, or leak background music into the exported reference clip.
 
 Like :mod:`voxxy.speakergate`, separation runs in a standalone PEP 723 script

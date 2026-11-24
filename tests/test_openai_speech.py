@@ -77,9 +77,9 @@ def test_openai_stock_or_unknown_voice_uses_default_and_says_so(vox, wav, voice)
     voxcpm = FakeEngine("voxcpm", wav=wav)
     r = _speak(vox(voxcpm), voice=voice, response_format="wav")
     assert r.status_code == 200
-    assert r.headers["x-vox-voice"] == "rick"
-    assert "default voice 'rick'" in r.headers["x-vox-voice-fallback"]
-    assert voxcpm.calls[0]["prompt_text"] == "rick transcript"
+    assert r.headers["x-vox-voice"] == "house-f1"  # the code default; the fleet's compose sets its own
+    assert "default voice 'house-f1'" in r.headers["x-vox-voice-fallback"]
+    assert voxcpm.calls[0]["prompt_text"] == "house transcript"
 
 
 def test_openai_voice_object_with_id(vox, wav) -> None:
@@ -89,7 +89,7 @@ def test_openai_voice_object_with_id(vox, wav) -> None:
 
 def test_omitted_voice_is_default_without_fallback_note(vox, wav) -> None:
     r = _speak(vox(FakeEngine("voxcpm", wav=wav)), response_format="wav")
-    assert r.headers["x-vox-voice"] == "rick"
+    assert r.headers["x-vox-voice"] == "house-f1"
     assert "x-vox-voice-fallback" not in r.headers
 
 

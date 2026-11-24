@@ -1,6 +1,6 @@
 """Reference-clip analysis: find the cleanest 10-15 s of speech in a longer recording.
 
-Why this exists. Measured on ``arnold`` (2026-10-28): the single biggest quality
+Why this exists. Measured on a fleet voice (2026-10-28): the single biggest quality
 lever for voxcpm cloning is giving it the exact transcript of the reference clip
 (``prompt_text``), which switches the model from voice-clone to continuation mode
 (ECAPA speaker similarity 0.59 -> 0.72 for a clean sentence-boundary cut -> 0.82-0.85
@@ -32,6 +32,8 @@ Heavy dependencies (numpy, scipy, faster-whisper) are imported inside functions 
 
 from __future__ import annotations
 
+from voxxy import _bundle
+
 import bisect
 import hashlib
 import json
@@ -48,7 +50,7 @@ DEFAULT_WHISPER_MODEL = "deepdml/faster-whisper-large-v3-turbo-ct2"
 DEFAULT_MIN_SECONDS = 10.0
 DEFAULT_MAX_SECONDS = 15.0
 
-INSTALL_HINT = 'uv tool install --editable "$HOME/code/voxxy/cli[clone]" --force'
+INSTALL_HINT = _bundle.CLONE_INSTALL_HINT
 
 FRAME_WIN = 400  # 25 ms @ 16 kHz
 FRAME_HOP = 160  # 10 ms

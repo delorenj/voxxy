@@ -35,3 +35,6 @@ agents/hermes/*/runtime/
 
 # house-voices/build.py and evaluate.py write generated clips here; voices.toml holds their sha256
 house-voices/out/
+
+# self-hosted bundle build output (scripts/bundle/build.py)
+/dist/

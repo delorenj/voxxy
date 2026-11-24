@@ -35,7 +35,7 @@ def is_hosted() -> bool:
 
 # ------------------------------------------------------- biometric release (hosted)
 
-# DRAFT wording: Jarad approves the final text. This is the one source for the release the hosted
+# DRAFT wording: the owner approves the final text. This is the one source for the release the hosted
 # edition shows before a person records their own voice, and for its version. Change the text, bump
 # the version: ``consent.terms_version()`` folds the version into every consent record. Nothing here
 # claims the retention purge is automated; the text only states the promise.
@@ -60,7 +60,7 @@ def release_accepted(value: str | None) -> bool:
 
 # "sounds like X", "voice of X", "impression of X", ... Each is followed by the thing the voice
 # resembles. It is fine when that is a plain description ("sounds like a tired old man") and a
-# refusal when it is anything else ("sounds like morgan freeman", "voice of Oprah").
+# refusal when it is anything else ("sounds like <a named actor>", "voice of <a named host>").
 _COMPARISON = re.compile(
     r"\b(?:"
     r"sounds?\s+like|sounded\s+like|sounding\s+like|"
@@ -113,7 +113,7 @@ north south east west central
 monday tuesday wednesday thursday friday saturday sunday
 """.split())
 
-# Two or more capitalised words in a row ("Morgan Freeman", "Samuel L. Jackson" via the L.).
+# Two or more capitalised words in a row ("Jane Doe", "John Q. Public" via the Q.).
 _CAP_WORD = r"[A-Z][a-z]+(?:['-][A-Za-z]+)*\.?"
 _CAP_RUN = re.compile(rf"\b{_CAP_WORD}(?:\s+(?:{_CAP_WORD}|[A-Z]\.))+")
 
@@ -145,8 +145,8 @@ def refuse_real_person(description: str) -> str | None:
             return REFUSAL_REASON
     for match in _CAP_RUN.finditer(text):
         words = [w.strip(".'-").lower() for w in re.split(r"\s+", match.group(0))]
-        # A name is two neighbours that are both not voice vocabulary ("Young Morgan Freeman"
-        # still has "Morgan Freeman"; "Young Woman" and "American English" have none).
+        # A name is two neighbours that are both not voice vocabulary ("Young Jane Doe"
+        # still has "Jane Doe"; "Young Woman" and "American English" have none).
         if any(a not in _DESCRIPTIVE and b not in _DESCRIPTIVE for a, b in zip(words, words[1:])):
             return REFUSAL_REASON
     return None

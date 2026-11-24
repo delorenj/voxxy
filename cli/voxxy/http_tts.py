@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from voxxy import _bundle
+
 import argparse
 import json
 import os
@@ -21,7 +23,7 @@ from voxxy.client import (
     VoxValidationError,
 )
 
-DEFAULT_URL = "https://vox.delo.sh"
+DEFAULT_URL = _bundle.DEFAULT_URL
 SUPPORTED_FORMATS = frozenset({"wav", "ogg", "opus", "mp3", "flac"})
 OGGISH_FORMATS = frozenset({"ogg", "opus"})
 TRANSCODE_FORMATS = frozenset({"mp3", "flac"})
