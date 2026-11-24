@@ -346,7 +346,7 @@ in the second column.
 | G1 | Key store and middleware (section 7.1): customers, hashed keys, per-key rules, admin CLI. Today: a single env key | voxxy | 3 |
 | G2 | Voice ownership: `owner_id` migration 004, scoped list and get, house and designed catalog visible to customers, fleet voices root-only. Today: one flat table | voxxy | 2 |
 | G3 | Usage ledger, quotas, concurrency cap, 429 and `GET /v1/usage`; measure real throughput on the 3090 and set the subscriber cap. Today: none | voxxy | 3 |
-| G4 | Self-hosted bundle: build script that strips fleet voices and personas, ships VoxCPM2 compose and the four house voices, excludes the web-search clone flow (or moves it to an optional plugin), license verify at daemon start, `voxxy license import`, install check, docs. Today: a repo-checkout install tied to Jarad's machine | voxxy | 5 |
+| G4 | Self-hosted bundle: build script that strips fleet voices and personas, ships VoxCPM2 compose and the four house voices, excludes the web-search clone flow (or moves it to an optional plugin), license verify at daemon start, `voxxy license import`, install check, docs. **Built 2026-11-23** (voxxy `87de72b`, `3fc48da`, `925dad9`): manifest-driven build, check and install smoke, VS1 license; story `voxxy-g4-selfhost-bundle.md`. Open: signing key, N11 repo move, real GPU install | voxxy | 5 |
 | G5 | Consent flow: challenge, live consent upload, ASR check, speaker embedding match, account voiceprint, review queue, consent record. Spike first: TitaNet-large (Wax) versus TitaNet-small (sherpa-onnx), and calibrate thresholds on real recordings. Today: `voice_clone` is a CLI workflow with no identity check | voxxy, with Wax as the reference | 6 |
 | G6 | Voice design endpoint: lift `house-voices/build.py` logic to `POST /voices/design`, add the real-person-name refusal and design slots. Today: offline script | voxxy | 2 |
 | G7 | Terms drafts: hosted terms, acceptable use, self-hosted operator terms, takedown and report path, privacy facts. Adapt Gruvato's drafts. Jarad approves every clause | voxxy (drafts), store (published pages) | 2 |
@@ -412,6 +412,16 @@ answers 422 `release_required` before a challenge is used. The release text is
 `CONSENT_RELEASE_VERSION = "draft-1"` in `app/edition.py` and waits for Jarad's approval (with
 the Batch 2 terms) before the hosted edition opens. Still open: the purge job (G7, parked as data
 deletion) and the EU/EEA exclusion at checkout (parked with payments).
+
+G4 built 2026-11-23 (voxxy `87de72b`, `3fc48da`, `925dad9`; story
+`_bmad-output/implementation-artifacts/stories/voxxy-g4-selfhost-bundle.md`). `mise run bundle:build`
+makes the tarball from `bundle/selfhost/manifest.toml` (VoxCPM2, four house voices, a CLI wheel
+without `clone` or `persona`) and checks it for fleet names, host names, secrets and stray audio;
+`mise run bundle:smoke` installs it as a buyer would and passed. The self edition checks a VS1
+license offline (soft: it always runs) and `voxxy license import` adds one. Parked for Jarad: the
+license signing key (until it exists every key reads invalid), the N11 move of personas and
+`voice_clone` out of the public repo, and a real GPU install on a buyer-like machine. The build is
+product-agnostic, so G10's issuer and any later self-hosted product reuse it.
 
 ### The questions as originally asked
 
