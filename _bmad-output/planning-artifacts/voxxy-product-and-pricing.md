@@ -406,6 +406,12 @@ Done 2026-11-23: the waitlist is the store's catalog sign-up on a new `/voxxy/` 
 `form_intake.py list --form store-notify --field product=voxxy --emails`), with a Voxxy card on
 the store home and the 33GOD front shelf; "second refusal goes to review" is live (voxxy
 `0b4b266`). G8 (`.launch.yaml`) is owner-edited only, so it is proposed, not written.
+The biometric release step is live (voxxy `1385e60`): in the hosted edition, Record yours shows
+the release text with an accept checkbox, and `POST /voices/own` without `release_accepted`
+answers 422 `release_required` before a challenge is used. The release text is
+`CONSENT_RELEASE_VERSION = "draft-1"` in `app/edition.py` and waits for Jarad's approval (with
+the Batch 2 terms) before the hosted edition opens. Still open: the purge job (G7, parked as data
+deletion) and the EU/EEA exclusion at checkout (parked with payments).
 
 ### The questions as originally asked
 
