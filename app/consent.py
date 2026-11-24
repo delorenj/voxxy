@@ -289,6 +289,13 @@ REASON_ACCOUNT_MISMATCH = (
 REASON_ASR_UNSURE = "We were not sure we heard every word, so a person will take a look at your recording."
 REASON_SPEAKER_UNSURE = "We could not tell for sure that the recordings match, so a person will take a look at your recording."
 REASON_MODEL_CHANGED = "This account's voiceprint was made by an older version of the check, so a person will take a look at your recording."
+REASON_SECOND_REFUSAL = (
+    "This is the second time in a row the voices did not match, so a person will take a look at your recording."
+)
+# Refusals about the voice itself. A second one in a row (within SECOND_REFUSAL_WINDOW_S) goes to a person,
+# so the model alone never permanently blocks someone (G5 spike, section 4). Phrase, code and too-short
+# refusals stay refusals: the person can simply record again.
+SECOND_REFUSAL_WINDOW_S = 24 * 3600
 REASON_FIRST_VOICE = "Every account's first voice is checked by a person."
 REASON_ACCEPTED = "Your recording matched the sentence, the code and your voice."
 REASON_UNAVAILABLE = "The consent check could not run."
@@ -302,7 +309,7 @@ class Decision:
 
 def decide(
     *, phrase: float, code: str, reference: float | None, account: float | None,
-    model_changed: bool = False, t: Thresholds, first_voice: bool = False,
+    model_changed: bool = False, t: Thresholds, first_voice: bool = False, prior_speaker_refusal: bool = False,
     consent_speech: float | None = None, reference_speech: float | None = None,
 ) -> Decision:
     """accepted / review / rejected from the numbers. Pure; every branch is unit-tested.
@@ -311,6 +318,8 @@ def decide(
     ``code`` is ``ok`` (within one edit of the code) or ``missing``.
     ``first_voice``: the account has no voiceprint yet and this is hosted; with ``t.review_first_voice`` it
     goes to review once every refusal check has passed.
+    ``prior_speaker_refusal``: this account's previous attempt was refused on the voice match; a second
+    voice-match refusal goes to review instead.
     """
     if phrase < t.phrase_review:
         return Decision(REJECTED, REASON_PHRASE)
@@ -321,9 +330,11 @@ def decide(
     if reference_speech is not None and reference_speech < t.min_reference_speech:
         return Decision(REJECTED, REASON_REFERENCE_SPEECH)
     if reference is not None and reference < t.reject:
-        return Decision(REJECTED, REASON_REFERENCE_MISMATCH)
+        return Decision(REVIEW, REASON_SECOND_REFUSAL) if prior_speaker_refusal else \
+            Decision(REJECTED, REASON_REFERENCE_MISMATCH)
     if account is not None and account < t.reject:
-        return Decision(REJECTED, REASON_ACCOUNT_MISMATCH)
+        return Decision(REVIEW, REASON_SECOND_REFUSAL) if prior_speaker_refusal else \
+            Decision(REJECTED, REASON_ACCOUNT_MISMATCH)
     if model_changed:
         return Decision(REVIEW, REASON_MODEL_CHANGED)
     if first_voice and t.review_first_voice:
@@ -397,6 +408,7 @@ class ConsentStore(Protocol):
     async def resolve_review(self, record_id: str, *, decision: str, reviewer: str, note: Optional[str]) -> ConsentRecord: ...
     async def supersede_reviews(self, *, voice: str, keep: str) -> int: ...
     async def get_voiceprint(self, principal: str) -> Optional[AccountVoiceprint]: ...
+    async def last_record(self, principal: str) -> Optional[ConsentRecord]: ...
     async def set_voiceprint_if_absent(self, voiceprint: AccountVoiceprint) -> bool: ...
 
 
@@ -632,6 +644,11 @@ class ConsentGate:
         account with no voiceprint, this attempt fixes it; if a concurrent attempt fixed it first, the
         attempt is scored against that voiceprint and decided again (two first recordings at once must not
         both be "the account's person")."""
+        prior = await self.store.last_record(principal) if hosted else None
+        prior_speaker_refusal = bool(
+            prior is not None and prior.decision == REJECTED
+            and prior.reason in (REASON_REFERENCE_MISMATCH, REASON_ACCOUNT_MISMATCH)
+            and (datetime.now(timezone.utc) - prior.created_at).total_seconds() < SECOND_REFUSAL_WINDOW_S)
         for _ in range(2):
             stored = await self.store.get_voiceprint(principal)
             model_changed = stored is not None and stored.embedding_model != analysis.model_id
@@ -648,6 +665,7 @@ class ConsentGate:
             decision = decide(
                 phrase=analysis.phrase_score, code=analysis.code, reference=reference_score,
                 account=account_score, model_changed=model_changed, t=t, first_voice=hosted and stored is None,
+                prior_speaker_refusal=prior_speaker_refusal,
                 consent_speech=analysis.consent_speech_s, reference_speech=analysis.reference_speech_s,
             )
             if decision.decision == ACCEPTED and stored is None:

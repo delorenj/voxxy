@@ -127,6 +127,12 @@ T = Thresholds()   # the spike's bars: accept 0.70, reject 0.10, sentence 0.80 /
     (dict(phrase=1.0, code="missing", reference=None, account=None, first_voice=True), REJECTED, consent_mod.REASON_CODE),
     (dict(phrase=1.0, code="ok", reference=0.05, account=None, first_voice=True), REJECTED,
      consent_mod.REASON_REFERENCE_MISMATCH),                                         # refusals still refuse
+    (dict(phrase=1.0, code="ok", reference=0.05, account=None, prior_speaker_refusal=True), REVIEW,
+     consent_mod.REASON_SECOND_REFUSAL),
+    (dict(phrase=1.0, code="ok", reference=0.9, account=0.05, prior_speaker_refusal=True), REVIEW,
+     consent_mod.REASON_SECOND_REFUSAL),
+    (dict(phrase=1.0, code="missing", reference=0.05, account=0.05, prior_speaker_refusal=True), REJECTED,
+     consent_mod.REASON_CODE),                                     # a wrong code is a re-record, never a review
 ])
 
 def test_decide(kw, decision, reason) -> None:
@@ -258,6 +264,18 @@ def test_second_voice_from_the_same_person_is_accepted_and_scored_against_the_vo
     second = [x for x in _records(env) if x.voice == "second"][0]
     assert second.speaker_score_account == pytest.approx(1.0, abs=1e-5)
     assert second.decision == "accepted"
+
+
+def test_a_second_voice_match_refusal_in_a_row_goes_to_a_person(env, make_wav) -> None:
+    env.embedder.speakers[440] = unit(0.02)
+    assert _own(env, _challenge(env), make_wav, name="first").status_code == 200
+    assert _own(env, _challenge(env), make_wav, name="second", hz=440.0).status_code == 422
+    r = _own(env, _challenge(env), make_wav, name="second", hz=440.0)
+    assert r.status_code == 200, r.text
+    assert consent_mod.public_tags(env.repo.voices["second"].tags) == ["own", "consent-pending"]
+    assert _records(env)[-1].reason == consent_mod.REASON_SECOND_REFUSAL
+    # ...and the one after that is a fresh refusal: the model never blocks for good, a person never gets spammed
+    assert _own(env, _challenge(env), make_wav, name="third", hz=440.0).status_code == 422
 
 
 def test_second_voice_from_a_different_person_is_refused_plainly(env, make_wav) -> None:

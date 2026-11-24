@@ -92,6 +92,10 @@ class MemoryConsentStore:
     async def get_voiceprint(self, principal: str) -> Optional[c.AccountVoiceprint]:
         return self.voiceprints.get(principal)
 
+    async def last_record(self, principal: str) -> Optional[c.ConsentRecord]:
+        mine = [r for r in self.records.values() if r.principal == principal]
+        return max(mine, key=lambda r: r.created_at) if mine else None
+
     async def set_voiceprint_if_absent(self, voiceprint: c.AccountVoiceprint) -> bool:
         if voiceprint.principal in self.voiceprints:
             return False
@@ -204,6 +208,12 @@ class PgConsentStore:
                 f"SELECT {_RECORD_COLUMNS} FROM consent_records WHERE ($1::text IS NULL OR decision = $1) "
                 "ORDER BY created_at LIMIT $2", decision, limit)
         return [_row_to_record(r) for r in rows]
+
+    async def last_record(self, principal: str) -> Optional[c.ConsentRecord]:
+        row = await self._pool.fetchrow(
+            f"SELECT {_RECORD_COLUMNS} FROM consent_records WHERE principal = $1 ORDER BY created_at DESC LIMIT 1",
+            principal)
+        return _row_to_record(row) if row else None
 
     async def supersede_reviews(self, *, voice: str, keep: str) -> int:
         done = await self._pool.execute(
