@@ -138,6 +138,10 @@ for f in migrations/*.sql; do
 done
 '''
 
+[tasks."models:fetch"]
+description = "Download the G5 consent models (faster-whisper base.en, TitaNet-large) into ./models, sha256-checked."
+run = "VOX_MODELS_DIR=./models uv run python -m app.models"
+
 [[watch_files]]
 patterns = ["AGENTS.md"]
 task = "link:agentfiles"

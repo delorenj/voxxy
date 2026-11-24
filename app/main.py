@@ -32,6 +32,13 @@ Environment:
                        limits (default 2 MiB / 15 s / 0.5 s; app/reference.py)
   VOX_REFERENCE_ENGINES  engines allowed to clone a per-request clip (default voxcpm)
   VOX_ENGINE_LANGUAGES   per-engine language override, e.g. "vibevoice=en,zh;voxcpm=*"
+  VOX_OPERATOR_KEY     key for the consent review queue (/consent/reviews*); unset = 503 there
+  VOX_MODELS_DIR       consent models (faster-whisper base.en, TitaNet-large); default /data/models
+  VOX_CONSENT_ACCEPT / _REJECT  speaker-match thresholds (0.70 / 0.10, TitaNet-large, from the G5 spike)
+  VOX_CONSENT_PHRASE_OK / _PHRASE_REVIEW  sentence score bars (0.80 / 0.50); VOX_CONSENT_MIN_SPEECH /
+                       _MIN_REFERENCE_SPEECH  seconds of speech required (6 / 8)
+  VOX_CONSENT_PRELOAD  load the consent models at startup (default 1)
+  VOX_TERMS_VERSION    terms version stored on each consent record (default draft-1)
   ELEVENLABS_API_KEY   enables the ElevenLabs fallback engine (optional)
   ELEVENLABS_DEFAULT_VOICE  default ElevenLabs voice id (default: Adam)
 """
@@ -62,9 +69,17 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app import audio as audio_codec
 from app import consent as consent_mod
+from app import consent_store as consent_store_mod
 from app import edition as edition_mod
 from app import voices as voices_mod
-from app.auth import ApiKeyAuthMiddleware, resolve_api_key_from_env
+from app.auth import (
+    ApiKeyAuthMiddleware,
+    headers_have_valid_api_key,
+    operator_key_conflict,
+    principal_for,
+    resolve_api_key_from_env,
+    resolve_operator_key_from_env,
+)
 from app import cache as audio_cache
 from app import sink as sink_relay
 from app.engines import (
@@ -92,6 +107,9 @@ REF_AUDIO_MAX_SECONDS = float(os.environ.get("VOX_REF_AUDIO_MAX_SECONDS", "30"))
 _repo: VoiceRepo | None = None
 _engine: EngineOrchestrator | None = None
 _sweep_task: asyncio.Task | None = None
+# The consent gate (app/consent.py): the single entry for likeness-making. Built in lifespan over postgres.
+_consent_gate: consent_mod.ConsentGate | None = None
+_preload_task: asyncio.Task | None = None
 
 # Sink listeners are plain in-process state, not a lifespan resource: a sink is
 # a live attention channel, so there is nothing to open at boot and nothing
@@ -278,6 +296,8 @@ class VoiceOut(BaseModel):
     vibevoice_ref_path: Optional[str] = None
     vibevoice_speaker_tag: Optional[str] = None
     persona: Optional[str] = None
+    # verified | pending | unchecked, from the tags; None for voices the consent gate never touched.
+    consent: Optional[str] = None
 
     @classmethod
     def from_model(cls, v: Voice) -> "VoiceOut":
@@ -286,11 +306,12 @@ class VoiceOut(BaseModel):
             display_name=v.display_name,
             duration_s=v.duration_s,
             prompt_text=v.prompt_text,
-            tags=v.tags,
+            tags=consent_mod.public_tags(v.tags),
             elevenlabs_voice_id=v.elevenlabs_voice_id,
             vibevoice_ref_path=v.vibevoice_ref_path,
             vibevoice_speaker_tag=v.vibevoice_speaker_tag,
             persona=v.persona,
+            consent=consent_mod.consent_state(v.tags),
         )
 
 
@@ -325,6 +346,9 @@ async def _resolve_voice(voice_name: Optional[str]) -> tuple[
     v = await _repo.get(voice_name)
     if v is None:
         raise HTTPException(404, f"voice '{voice_name}' not found")
+    blocked = consent_mod.synthesis_block_reason(v.tags)
+    if blocked:
+        raise HTTPException(403, blocked, headers={"X-Vox-Error": "consent_pending"})
     if not v.abs_path.exists():
         raise HTTPException(500, f"voice file missing on disk: {v.abs_path}")
 
@@ -371,14 +395,26 @@ async def _synthesize_wav(
     )
 
 
-def _request_synth_kwargs(req: SynthesizeRequest) -> dict[str, Any]:
+def _require_ungated_clone(request: Request) -> None:
+    """403 unless this caller may turn a clip into a voice without the consent gate (per-request
+    ``reference_audio_b64``, plain ``POST /voices``). The rule lives in ``consent.ungated_clone_allowed``."""
+    if not consent_mod.ungated_clone_allowed(principal_for(request.headers)):
+        raise HTTPException(
+            403, "This key can only use voices made through the consent check; a clip sent along with a request "
+                 "or uploaded as a voice is not allowed.",
+            headers={"X-Vox-Error": "clone_requires_consent"})
+
+
+def _request_synth_kwargs(req: SynthesizeRequest, request: Request) -> dict[str, Any]:
     """Map a request body onto ``_synthesize_wav`` kwargs, validating its clip.
 
     An unusable clip is a 422 raised here, before any engine is called, so
-    ``require_reference`` with a bad clip is an error and never a fallback.
+    ``require_reference`` with a bad clip is an error and never a fallback. A per-request clip is
+    likeness-making outside the consent gate, so it is refused for callers who may not do that.
     """
     reference: Optional[ReferenceAudio] = None
     if req.reference_audio_b64 is not None:
+        _require_ungated_clone(request)
         try:
             reference = decode_reference(
                 req.reference_audio_b64,
@@ -491,15 +527,47 @@ mcp_app = mcp.http_app(path="/")  # mount at root of the sub-app so /mcp hits it
 
 # ---------- lifespan (wraps MCP lifespan so its task group boots) ----------
 
+async def _retag_legacy_consent() -> None:
+    """Web app v1 tagged every own voice ``unverified-consent``; no consent record exists for any of them.
+    Hosted: they become ``consent-pending`` (not usable for speech until reviewed or re-recorded).
+    Self: ``consent-unchecked-self`` (usable; the operator's responsibility). Idempotent."""
+    assert _repo is not None
+    new = (consent_mod.TAG_PENDING if edition_mod.is_hosted() else consent_mod.TAG_UNCHECKED_SELF)
+    try:
+        changed = await _repo.retag(consent_mod.TAG_LEGACY_UNVERIFIED, new)
+        if changed:
+            logger.info("retagged %d v1 voice(s) %s -> %s (no consent records exist for them)",
+                        changed, consent_mod.TAG_LEGACY_UNVERIFIED, new)
+    except Exception:  # noqa: BLE001 - the guard treats the legacy tag as pending anyway
+        logger.exception("could not retag v1 consent voices")
+
+
+async def _preload_consent_models() -> None:
+    assert _consent_gate is not None
+    try:
+        await _consent_gate.ensure_ready()
+        logger.info("consent models ready")
+    except consent_mod.ConsentUnavailable:
+        logger.warning("consent models did not load; the first consent check will retry")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _repo, _engine, _sweep_task
+    global _repo, _engine, _sweep_task, _consent_gate, _preload_task
+    if operator_key_conflict():
+        raise RuntimeError("VOX_OPERATOR_KEY must differ from VOX_API_KEY: the ordinary key would open the review queue")
     dsn = os.environ["VOX_DATABASE_URL"]
     VOICES_DIR.mkdir(parents=True, exist_ok=True)
     audio_cache.ensure_dir()
 
     _repo = await VoiceRepo.connect(dsn)
     _engine = EngineOrchestrator(_build_engine_chain())
+    _consent_gate = consent_mod.ConsentGate(
+        consent_store_mod.PgConsentStore(_repo.pool), consent_mod.default_providers())
+    await _retag_legacy_consent()
+    if os.environ.get("VOX_CONSENT_PRELOAD", "1").strip() not in ("0", "false", "no"):
+        # Load the models in the background so the first person to record does not wait for a download.
+        _preload_task = asyncio.create_task(_preload_consent_models())
 
     _sweep_task = asyncio.create_task(audio_cache.sweep_loop())
 
@@ -512,8 +580,9 @@ async def lifespan(app: FastAPI):
         async with mcp_app.lifespan(app):
             yield
     finally:
-        if _sweep_task:
-            _sweep_task.cancel()
+        for task in (_sweep_task, _preload_task):
+            if task:
+                task.cancel()
         await _repo.close()
 
 
@@ -620,7 +689,8 @@ async def app_config(request: Request) -> dict:
             "describe_voice": True,
             "upload_clip": not hosted,   # the web app offers upload only in the self edition
             "real_name_check": hosted,
-            "consent_verification": False,  # ASR + speaker match are story G5
+            "consent_verification": True,   # ASR + speaker match (story G5); self edition only warns
+            "consent_reference_upload": not hosted,  # a longer sample may be uploaded, not only recorded
             "sink": True,
         },
     }
@@ -691,14 +761,14 @@ async def install_sh(request: Request) -> Response:
 
 
 @app.post("/synthesize", responses={200: {"content": {"audio/wav": {}}}})
-async def synthesize(req: SynthesizeRequest) -> Response:
+async def synthesize(req: SynthesizeRequest, request: Request) -> Response:
     """Raw WAV synthesis. Runs the engine chain, returns the winning engine's bytes.
 
     Headers on success: ``X-Vox-Engine`` and ``X-Vox-Voice-Source``
     (reference | registered | stock).
     """
     assert _engine is not None and _repo is not None
-    kwargs = _request_synth_kwargs(req)
+    kwargs = _request_synth_kwargs(req, request)
     try:
         result = await _synthesize_wav(**kwargs)
     except HTTPException:
@@ -719,7 +789,7 @@ async def synthesize_url(req: SynthesizeRequest, request: Request, response: Res
     Consumers like Telegram's sendVoice fetch the URL directly from our
     /audio/<id>.ogg route. The cache entry expires per ``VOX_AUDIO_TTL_SECONDS``.
     """
-    kwargs = _request_synth_kwargs(req)
+    kwargs = _request_synth_kwargs(req, request)
     try:
         resp = await _synthesize_and_cache(**kwargs, request=request)
     except HTTPException:
@@ -953,7 +1023,7 @@ async def sink_say(key: str, req: SynthesizeRequest, request: Request) -> SinkPl
     usable ``audio_url`` -- the caller can fall back to playing it itself.
     """
     _validated_key(key)
-    kwargs = _request_synth_kwargs(req)
+    kwargs = _request_synth_kwargs(req, request)
     try:
         resp = await _synthesize_and_cache(**kwargs, request=request)
     except HTTPException:
@@ -1019,7 +1089,10 @@ VOICE_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,47}$")
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 OWN_MIN_SECONDS = 8.0       # the browser enforces 8 s; the server allows 0.5 s of timer jitter
 OWN_MIN_SECONDS_SLACK = 0.5
-OWN_MAX_SECONDS = 60.0      # the UI stops at 30 s and REF_AUDIO_MAX_SECONDS trims what is kept
+REFERENCE_MIN_SECONDS = 10.0  # the optional longer sample
+# The UI stops at 30 s. The server allows a second of timer jitter past REF_AUDIO_MAX_SECONDS and then trims
+# the clip to exactly that, BEFORE the consent gate, so the gate judges the very audio the voice is made from.
+OWN_MAX_SECONDS_SLACK = 1.0
 DESIGN_DEFAULT_SAMPLE = (
     "Hello, this is my voice. I can read you a short story, answer a question, "
     "or just say good morning."
@@ -1028,9 +1101,6 @@ DESIGN_CFG = 2.0
 DESIGN_STEPS = 10
 TAG_OWN = "own"
 TAG_DESIGNED = "designed"
-TAG_UNVERIFIED = "unverified-consent"
-
-_challenges = consent_mod.ChallengeStore()
 
 
 def _store_voice_wav(src_path: str, name: str) -> tuple[Path, float]:
@@ -1117,6 +1187,7 @@ async def _read_upload(audio: UploadFile) -> bytes:
 
 @app.post("/voices", response_model=VoiceOut)
 async def create_voice(
+    request: Request,
     name: str = Form(..., description="Slug used as the API key, e.g. 'rick'"),
     display_name: str = Form(...),
     prompt_text: Optional[str] = Form(None),
@@ -1127,8 +1198,12 @@ async def create_voice(
 
     Uploaded audio is trimmed to REF_AUDIO_MAX_SECONDS and downmixed to mono
     before being stored under VOICES_DIR as <name>.wav.
+
+    This is the fleet's upload: likeness-making outside the consent gate, so callers who may not do that
+    (``consent.ungated_clone_allowed``) get 403 and must use ``POST /voices/own``.
     """
     assert _repo is not None
+    _require_ungated_clone(request)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=Path(audio.filename or "up").suffix) as tmp:
         shutil.copyfileobj(audio.file, tmp)
@@ -1281,13 +1356,19 @@ class ConsentChallengeOut(BaseModel):
     record_max_seconds: float = REF_AUDIO_MAX_SECONDS
 
 
-@app.post("/voices/consent/challenge", response_model=ConsentChallengeOut)
-async def consent_challenge() -> ConsentChallengeOut:
-    """Issue a single-use sentence and code to read aloud. Valid for 10 minutes.
+def _gate() -> consent_mod.ConsentGate:
+    if _consent_gate is None:
+        raise HTTPException(503, "consent check unavailable", headers={"X-Vox-Error": "consent_unavailable"})
+    return _consent_gate
 
-    The store is in memory (app/consent.py): a restart drops open challenges.
+
+@app.post("/voices/consent/challenge", response_model=ConsentChallengeOut)
+async def consent_challenge(request: Request) -> ConsentChallengeOut:
+    """Issue a single-use sentence and code to read aloud. Valid for 10 minutes, bound to the caller.
+
+    Stored in postgres (consent_challenges), so a restart does not drop open challenges.
     """
-    challenge = _challenges.issue()
+    challenge = await _gate().store.issue_challenge(principal_for(request.headers))
     return ConsentChallengeOut(
         challenge_id=challenge.challenge_id,
         sentence=challenge.sentence,
@@ -1336,70 +1417,265 @@ async def _as_readable_wav(data: bytes, suffix: str) -> tuple[str, bool]:
     return await _readable_wav_path(path)
 
 
-@app.post("/voices/own", response_model=VoiceOut)
+class ConsentOut(BaseModel):
+    decision: str            # accepted | review | unchecked (rejected is a 422)
+    state: str               # verified | pending | unchecked
+    message: str             # plain words for the person
+    record_id: str
+    usable: bool             # can the voice speak now
+    warning: Optional[str] = None  # self edition: the check failed but the voice was made anyway
+
+
+class OwnVoiceOut(VoiceOut):
+    consent_result: ConsentOut
+
+
+async def _readable_upload(audio: UploadFile) -> str:
+    data = await _read_upload(audio)
+    if not data:
+        raise HTTPException(422, "the recording is empty; record again")
+    path, _ = await _as_readable_wav(data, Path(audio.filename or "rec").suffix)
+    return path
+
+
+def _require_seconds(path: str, *, minimum: float, what: str) -> float:
+    duration = float(sf.info(path).duration)
+    if duration < minimum - OWN_MIN_SECONDS_SLACK:
+        raise HTTPException(
+            422, f"the {what} is {duration:.1f} s; it needs at least {minimum:.0f} seconds")
+    if duration > REF_AUDIO_MAX_SECONDS + OWN_MAX_SECONDS_SLACK:
+        raise HTTPException(422, f"the {what} is {duration:.0f} s; keep it under {REF_AUDIO_MAX_SECONDS:.0f} seconds")
+    return duration
+
+
+def _cap_clip(path: str) -> str:
+    """``path`` itself when it is within REF_AUDIO_MAX_SECONDS; otherwise a trimmed mono WAV of its first
+    REF_AUDIO_MAX_SECONDS (``path`` is deleted). What the consent gate scores and what the voice is made
+    from must be the same audio, so the cap is applied once, here, before either sees the clip."""
+    info = sf.info(path)
+    if float(info.duration) <= REF_AUDIO_MAX_SECONDS:
+        return path
+    data, sr = sf.read(path, frames=int(REF_AUDIO_MAX_SECONDS * info.samplerate))
+    if data.ndim == 2:
+        data = data.mean(axis=1)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+        capped = tmp.name
+    sf.write(capped, data, sr, subtype="PCM_16")
+    Path(path).unlink(missing_ok=True)
+    return capped
+
+
+@app.post("/voices/own", response_model=OwnVoiceOut)
 async def create_own_voice(
+    request: Request,
     challenge_id: str = Form(...),
     name: str = Form(..., description="Slug for the new voice, e.g. 'my-voice'"),
     display_name: str = Form(..., min_length=1, max_length=80),
-    audio: UploadFile = File(..., description="A live recording of the challenge sentence"),
-) -> VoiceOut:
-    """Add the caller's own voice from a live browser recording read against a challenge.
+    audio: UploadFile = File(..., description="A live recording of the challenge sentence and code"),
+    reference: Optional[UploadFile] = File(None, description="Optional longer sample (10-30 s) to make the voice from"),
+) -> OwnVoiceOut:
+    """Add the caller's own voice from a live recording of a challenge sentence and code, through the
+    consent gate (app/consent.py): ASR checks the sentence and code, speaker embeddings check the
+    recording against the optional longer ``reference`` sample and against the account's voiceprint.
 
-    Checks the challenge is valid, unused and unexpired, that the recording is at least 8 s, then
-    stores the voice tagged ``own`` and ``unverified-consent`` with a ``<name>.consent.json``
-    sidecar (challenge id, sentence, code, times, status).
+    - accepted: 200, voice tagged ``own`` + ``consent-verified``, usable now.
+    - review: 200, voice stored tagged ``own`` + ``consent-pending``; synthesis with it is 403 until the
+      operator approves (``consent.state`` is ``pending``).
+    - rejected: 422 with a plain reason, nothing stored but the consent record and its audio.
+    - consent models unavailable: 503, the challenge is not used up.
+    - self edition: the same checks run and are recorded, but a failed check only adds ``warning``; the
+      voice is made, tagged ``consent-unchecked-self``.
 
-    NOT VERIFIED YET: v1 does not check that the audio says the sentence and code (ASR), nor that
-    the voice matches a reference clip (speaker embedding). That is story G5; until it lands
-    the ``unverified-consent`` tag is the truth about these voices.
+    The voice is made from ``reference`` when given, otherwise from the consent recording.
     """
-    assert _repo is not None
     slug = _voice_slug(name)
     display_name = display_name.strip()
     if not display_name:
         raise HTTPException(422, "give the voice a display name")
+    gate = _gate()
+    principal = principal_for(request.headers)
     try:
-        _challenges.check(challenge_id)
+        await gate.store.check_challenge(challenge_id, principal)
     except consent_mod.ChallengeError as exc:
         raise _challenge_http_error(exc) from exc
     await _require_name_free(slug, TAG_OWN)
 
-    data = await _read_upload(audio)
-    if not data:
-        raise HTTPException(422, "the recording is empty; record again")
-    src, _ = await _as_readable_wav(data, Path(audio.filename or "rec").suffix)
+    consent_src = await _readable_upload(audio)
+    reference_src: Optional[str] = None
     try:
-        duration = float(sf.info(src).duration)
-        if duration < OWN_MIN_SECONDS - OWN_MIN_SECONDS_SLACK:
-            raise HTTPException(
-                422, f"the recording is {duration:.1f} s; read the whole sentence, at least {OWN_MIN_SECONDS:.0f} seconds",
-            )
-        if duration > OWN_MAX_SECONDS:
-            raise HTTPException(422, f"the recording is {duration:.0f} s; keep it under {REF_AUDIO_MAX_SECONDS:.0f} seconds")
-        try:
-            redeemed = _challenges.redeem(challenge_id)  # the single use happens here
-        except consent_mod.ChallengeError as exc:
-            raise _challenge_http_error(exc) from exc
+        duration = _require_seconds(consent_src, minimum=OWN_MIN_SECONDS, what="recording")
+        consent_src = _cap_clip(consent_src)
+        if reference is not None and (reference.filename or reference.size):
+            reference_src = await _readable_upload(reference)
+            _require_seconds(reference_src, minimum=REFERENCE_MIN_SECONDS, what="longer sample")
+            reference_src = _cap_clip(reference_src)
+        outcome = await _likeness_gate(
+            gate, principal=principal, challenge_id=challenge_id, voice=slug,
+            consent_audio=consent_src, reference_audio=reference_src)
+        if not outcome.create_voice:
+            logger.info("consent rejected voice=%s record=%s", slug, outcome.record.id)
+            raise HTTPException(422, outcome.reason, headers={"X-Vox-Error": "consent_rejected",
+                                                            "X-Vox-Consent-Record": outcome.record.id})
         v = await _register_voice_file(
-            name=slug, display_name=display_name, src_path=src,
-            source_label="own-voice-recording", prompt_text=None, tags=[TAG_OWN, TAG_UNVERIFIED],
+            name=slug, display_name=display_name, src_path=outcome.voice_audio,
+            source_label="own-voice-recording", prompt_text=None, tags=[TAG_OWN, *outcome.voice_tags],
         )
+        await gate.voice_replaced(outcome)
     finally:
-        Path(src).unlink(missing_ok=True)
+        Path(consent_src).unlink(missing_ok=True)
+        if reference_src:
+            Path(reference_src).unlink(missing_ok=True)
+    logger.info("consent %s voice=%s record=%s seconds=%.1f", outcome.decision, slug, outcome.record.id, duration)
+    return OwnVoiceOut(
+        **VoiceOut.from_model(v).model_dump(),
+        consent_result=ConsentOut(
+            decision=outcome.decision, state=outcome.state, record_id=outcome.record.id,
+            message=_consent_message(outcome), usable=outcome.state in ("verified", "unchecked"),
+            warning=outcome.warning),
+    )
 
-    sidecar = voices_mod.VOICES_DIR / f"{slug}.consent.json"
-    sidecar.write_text(json.dumps({
-        "voice": slug,
-        "consent": TAG_UNVERIFIED,
-        "challenge_id": redeemed.challenge_id,
-        "sentence": redeemed.sentence,
-        "code": redeemed.code,
-        "challenge_issued_at": redeemed.issued_at,
-        "recording_received_at": redeemed.redeemed_at,
-        "recording_seconds": round(duration, 2),
-        "checks": {"asr_transcript": "not_run", "speaker_match": "not_run"},
-    }, indent=2) + "\n")
-    return VoiceOut.from_model(v)
+
+async def _likeness_gate(
+    gate: consent_mod.ConsentGate, *, principal: str, challenge_id: str, voice: str,
+    consent_audio: str, reference_audio: Optional[str],
+) -> consent_mod.Outcome:
+    """THE entry for likeness-making: every path that turns a recording into a voice calls this and obeys
+    the outcome (``create_voice``, ``voice_tags``, ``voice_audio``). It maps the gate's failures to HTTP."""
+    unavailable = HTTPException(503, "consent check unavailable", headers={"X-Vox-Error": "consent_unavailable"})
+    try:
+        try:
+            await gate.ensure_ready()
+        except consent_mod.ConsentUnavailable as exc:
+            if edition_mod.is_hosted():
+                raise unavailable from exc
+            # self edition: the gate records an "unchecked" attempt and the voice is still made
+        return await gate.check(
+            principal=principal, challenge_id=challenge_id, voice=voice,
+            consent_audio=consent_audio, reference_audio=reference_audio)
+    except consent_mod.ChallengeError as exc:
+        raise _challenge_http_error(exc) from exc
+    except consent_mod.ConsentUnavailable as exc:
+        raise unavailable from exc
+
+
+def _consent_message(outcome: consent_mod.Outcome) -> str:
+    if outcome.state == "verified":
+        return "Your recording matched the sentence, the code and your voice. The voice is ready to use."
+    if outcome.state == "pending":
+        return ("Your recording is saved and a person will take a quick look at it. "
+                "The voice can speak once that is done. " + outcome.reason)
+    return outcome.warning or "The consent check did not run on this voice."
+
+
+# ---------- the review queue (operator only) ----------
+
+class ReviewIn(BaseModel):
+    decision: str = Field(..., description="approve or reject")
+    note: Optional[str] = Field(None, max_length=500)
+
+    @field_validator("decision")
+    @classmethod
+    def _decision(cls, v: str) -> str:
+        v = v.strip().lower()
+        if v not in ("approve", "reject"):
+            raise ValueError("decision must be approve or reject")
+        return v
+
+
+class ReviewOut(BaseModel):
+    id: str
+    voice: str
+    principal: str
+    sentence: str
+    code: str
+    transcript: Optional[str] = None
+    phrase_score: Optional[float] = None
+    code_ok: Optional[bool] = None
+    speaker_score_reference: Optional[float] = None
+    speaker_score_account: Optional[float] = None
+    decision: str
+    reason: Optional[str] = None
+    has_reference_audio: bool = False
+    created_at: str
+    reviewed_at: Optional[str] = None
+    reviewer: Optional[str] = None
+    review_note: Optional[str] = None
+
+    @classmethod
+    def from_record(cls, r: consent_mod.ConsentRecord) -> "ReviewOut":
+        return cls(
+            id=r.id, voice=r.voice, principal=r.principal, sentence=r.sentence, code=r.code,
+            transcript=r.transcript, phrase_score=r.phrase_score, code_ok=r.code_ok,
+            speaker_score_reference=r.speaker_score_reference, speaker_score_account=r.speaker_score_account,
+            decision=r.decision, reason=r.reason, has_reference_audio=bool(r.reference_audio_path),
+            created_at=r.created_at.isoformat(),
+            reviewed_at=r.reviewed_at.isoformat() if r.reviewed_at else None,
+            reviewer=r.reviewer, review_note=r.review_note,
+        )
+
+
+def _require_operator(request: Request) -> None:
+    """Review routes need the operator key (VOX_OPERATOR_KEY), not the ordinary API key."""
+    expected = resolve_operator_key_from_env()
+    if expected is None:
+        raise HTTPException(503, "no operator key configured", headers={"X-Vox-Error": "no_operator_key"})
+    if not headers_have_valid_api_key(request.headers, expected):
+        raise HTTPException(403, "this needs the operator key", headers={"X-Vox-Error": "operator_only"})
+
+
+@app.get("/consent/reviews", response_model=list[ReviewOut])
+async def list_consent_reviews(request: Request, status: str = "review") -> list[ReviewOut]:
+    """Consent records waiting for a person (``status=review``, the default; oldest first, it is a queue).
+    ``status=all`` lists the latest 200 records of any decision and any other value the latest 200 with
+    that decision (accepted, rejected, unchecked); both come back newest last."""
+    _require_operator(request)
+    records = await _gate().store.list_records(
+        None if status == "all" else status, newest=status != "review")
+    return [ReviewOut.from_record(r) for r in records]
+
+
+# Kept consent audio keeps the format it arrived in when soundfile reads it (``.ogg``, ``.flac``), else WAV.
+_AUDIO_TYPES = {".wav": "audio/wav", ".ogg": "audio/ogg", ".oga": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac"}
+
+
+@app.get("/consent/reviews/{record_id}/audio")
+async def consent_review_audio(record_id: str, request: Request, which: str = "consent") -> FileResponse:
+    """The audio behind a record, so the reviewer can listen. ``which`` is ``consent`` or ``reference``."""
+    _require_operator(request)
+    record = await _gate().store.get_record(record_id)
+    if record is None:
+        raise HTTPException(404, "no such consent record")
+    name = record.reference_audio_path if which == "reference" else record.consent_audio_path
+    path = (consent_mod.consent_dir() / name) if name else None
+    if path is None or path.resolve().parent != consent_mod.consent_dir().resolve() or not path.is_file():
+        raise HTTPException(404, "no audio kept for that record")
+    return FileResponse(path, media_type=_AUDIO_TYPES.get(path.suffix.lower(), "application/octet-stream"))
+
+
+@app.post("/consent/reviews/{record_id}", response_model=ReviewOut)
+async def resolve_consent_review(record_id: str, body: ReviewIn, request: Request) -> ReviewOut:
+    """Approve or reject a queued own-voice recording. Approve: the voice becomes ``consent-verified``
+    and usable (and fixes the account voiceprint if there is none). Reject: the voice is deleted; the
+    record and its audio stay."""
+    _require_operator(request)
+    assert _repo is not None
+    gate = _gate()
+    try:
+        record = await gate.resolve_review(record_id, decision=body.decision, reviewer="operator", note=body.note)
+    except consent_mod.ReviewError as exc:
+        raise HTTPException(404 if exc.kind == "unknown" else 409, str(exc)) from exc
+    voice = await _repo.get(record.voice)
+    # Only touch the voice THIS record made: an own voice, still waiting, carrying this record's tag. A newer
+    # recording under the same name has its own record; approving or rejecting this one must not reach it.
+    if (voice is not None and TAG_OWN in voice.tags and consent_mod.TAG_PENDING in voice.tags
+            and consent_mod.record_id_of(voice.tags) == record.id):
+        if body.decision == "approve":
+            tags = [t for t in voice.tags if t != consent_mod.TAG_PENDING] + [consent_mod.TAG_VERIFIED]
+            await _repo.set_tags(voice.name, tags)
+        else:
+            await _repo.delete(voice.name)
+            voice.abs_path.unlink(missing_ok=True)
+    return ReviewOut.from_record(record)
 
 
 @app.put("/voices/{name}/persona", response_model=VoiceOut)

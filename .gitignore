@@ -1,6 +1,8 @@
 voices/**/*
 agents/**/*runtime*
 audio-cache/
+# G5 consent models (downloaded on first use, sha256-pinned in app/models.py)
+models/
 
 # voxxy CLI artifacts
 .voxxy.state.json

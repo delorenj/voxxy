@@ -33,6 +33,21 @@ _USE_ENV = object()
 _REF_CACHE: dict[str, str | None] = {}
 
 
+def _resolve_ref(ref: str) -> str | None:
+    """``op read`` a 1Password reference once per process; a failed read is None."""
+    if ref not in _REF_CACHE:
+        import subprocess
+
+        try:
+            done = subprocess.run(["op", "read", "--no-newline", ref], capture_output=True,
+                                  text=True, timeout=20, stdin=subprocess.DEVNULL)
+            value = done.stdout.strip() if done.returncode == 0 else ""
+            _REF_CACHE[ref] = value or None
+        except (OSError, subprocess.TimeoutExpired):
+            _REF_CACHE[ref] = None
+    return _REF_CACHE[ref]
+
+
 def env_api_key(environ: Optional[dict] = None) -> str | None:
     """The caller's Voxxy key: $VOX_API_KEY, else $VOX_API_KEY_REF, else config `api_key_ref` (op read).
 
@@ -53,19 +68,21 @@ def env_api_key(environ: Optional[dict] = None) -> str | None:
             ref = (load_config().api_key_ref or "").strip()
         except Exception:  # noqa: BLE001 - an unreadable config means "no key", never a crash
             ref = ""
-    if not ref:
-        return None
-    if ref not in _REF_CACHE:
-        import subprocess
+    return _resolve_ref(ref) if ref else None
 
-        try:
-            done = subprocess.run(["op", "read", "--no-newline", ref], capture_output=True,
-                                  text=True, timeout=20, stdin=subprocess.DEVNULL)
-            value = done.stdout.strip() if done.returncode == 0 else ""
-            _REF_CACHE[ref] = value or None
-        except (OSError, subprocess.TimeoutExpired):
-            _REF_CACHE[ref] = None
-    return _REF_CACHE[ref]
+
+def env_operator_key(environ: Optional[dict] = None) -> str | None:
+    """The operator key for the consent review routes: $VOX_OPERATOR_KEY, else $VOX_OPERATOR_KEY_REF (op read).
+
+    Same shape as ``env_api_key`` but with no config-file fallback: the operator key lives only where the
+    operator keeps it. None means not set; the server then answers 503 or 403 and the command says which.
+    """
+    env = os.environ if environ is None else environ
+    direct = (env.get("VOX_OPERATOR_KEY") or "").strip()
+    if direct:
+        return direct
+    ref = (env.get("VOX_OPERATOR_KEY_REF") or "").strip()
+    return _resolve_ref(ref) if ref else None
 
 
 # ---------- typed exceptions ----------
@@ -130,6 +147,28 @@ class VoiceOut(BaseModel):
     # persona frontmatter ``voices:``), "none" = explicitly no persona, else a
     # persona id. Older servers omit the field entirely; None covers that too.
     persona: Optional[str] = None
+
+
+class ConsentReview(BaseModel):
+    """One consent record, as GET /consent/reviews returns it (the operator's review queue)."""
+
+    id: str
+    voice: str
+    principal: str
+    sentence: str
+    code: str
+    transcript: Optional[str] = None
+    phrase_score: Optional[float] = None
+    code_ok: Optional[bool] = None
+    speaker_score_reference: Optional[float] = None
+    speaker_score_account: Optional[float] = None
+    decision: str
+    reason: Optional[str] = None
+    has_reference_audio: bool = False
+    created_at: str
+    reviewed_at: Optional[str] = None
+    reviewer: Optional[str] = None
+    review_note: Optional[str] = None
 
 
 class SinkStatusResponse(BaseModel):
@@ -244,6 +283,23 @@ class VoxClient:
             )
 
         return resp
+
+    def list_consent_reviews(self, status: str = "review") -> list[ConsentReview]:
+        """GET /consent/reviews: consent records waiting for a person (operator key)."""
+        resp = self._request("GET", "/consent/reviews", params={"status": status})
+        return [ConsentReview.model_validate(r) for r in resp.json()]
+
+    def resolve_consent_review(self, record_id: str, decision: str, note: str | None = None) -> ConsentReview:
+        """POST /consent/reviews/{id}: ``approve`` or ``reject`` a queued own-voice recording (operator key)."""
+        payload: dict = {"decision": decision}
+        if note:
+            payload["note"] = note
+        resp = self._request("POST", f"/consent/reviews/{record_id}", json=payload)
+        return ConsentReview.model_validate(resp.json())
+
+    def consent_review_audio(self, record_id: str, which: str = "consent") -> bytes:
+        """GET /consent/reviews/{id}/audio: the recording behind a record (``consent`` or ``reference``)."""
+        return self._request("GET", f"/consent/reviews/{record_id}/audio", params={"which": which}).content
 
     def healthz(self) -> HealthResponse:
         """GET /healthz — returns overall status + per-engine readiness."""

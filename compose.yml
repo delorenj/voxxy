@@ -21,6 +21,24 @@ services:
       # descriptions of real people. "self" also allows uploading a clip.
       # Unknown values fall back to hosted.
       VOX_EDITION: ${VOX_EDITION:-hosted}
+      # G5 consent gate. Models (faster-whisper base.en, TitaNet-large 101 MB) download on
+      # first use into VOX_MODELS_DIR and are checked against a pinned sha256.
+      VOX_MODELS_DIR: /data/models
+      # Operator-only key for GET/POST /consent/reviews. Unset = those routes answer 503.
+      # Must differ from VOX_API_KEY (the app refuses to start otherwise).
+      VOX_OPERATOR_KEY: ${VOX_OPERATOR_KEY:-}
+      # Bars from the G5 calibration spike (TitaNet-large raw cosine, silence cut out first):
+      # accept >= 0.70, refuse < 0.10, review in between; sentence score 0.80 / 0.50; at
+      # least 6 s of speech in the consent clip and 8 s in a longer sample. Recalibrate after
+      # about 50 reviewed real consent pairs.
+      VOX_CONSENT_ACCEPT: ${VOX_CONSENT_ACCEPT:-0.70}
+      VOX_CONSENT_REJECT: ${VOX_CONSENT_REJECT:-0.10}
+      VOX_CONSENT_PHRASE_OK: ${VOX_CONSENT_PHRASE_OK:-0.80}
+      VOX_CONSENT_PHRASE_REVIEW: ${VOX_CONSENT_PHRASE_REVIEW:-0.50}
+      VOX_CONSENT_MIN_SPEECH: ${VOX_CONSENT_MIN_SPEECH:-6}
+      VOX_CONSENT_MIN_REFERENCE_SPEECH: ${VOX_CONSENT_MIN_REFERENCE_SPEECH:-8}
+      VOX_CONSENT_PRELOAD: ${VOX_CONSENT_PRELOAD:-1}
+      VOX_TERMS_VERSION: ${VOX_TERMS_VERSION:-draft-1}
       # Default destination for the speak_sink MCP tool, so a fleet agent can
       # reach whoever is listening without knowing the sink name. Empty means
       # callers must pass one explicitly.
@@ -40,6 +58,8 @@ services:
       # Short-lived OGG/Opus blobs served via /audio/<id>.ogg and fetched by
       # Telegram, browsers, Home Assistant, etc. Swept on a timer.
       - ./audio-cache:/data/audio-cache
+      # Consent-check models, downloaded once on first use and kept across rebuilds.
+      - ./models:/data/models
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

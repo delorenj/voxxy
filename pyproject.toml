@@ -12,6 +12,9 @@ dependencies = [
     "python-multipart",
     "soundfile",
     "httpx>=0.27",
+    "faster-whisper>=1.2.1",
+    "sherpa-onnx>=2.0.3",
+    "numpy>=2.4.4",
 ]
 
 [tool.uv]
@@ -21,4 +24,9 @@ index-url = "https://pypi.org/simple"
 dev = [
     "anyio>=4.13.0",
     "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: runs the real consent models (TitaNet-large, faster-whisper base.en); skipped when the model files are not on this host",
 ]

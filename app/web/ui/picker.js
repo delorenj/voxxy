@@ -1,13 +1,16 @@
 // Searchable voice picker: a button showing the current voice, and a panel with a filter and radio rows.
 
 import { h, icons } from "./dom.js";
-import { kindOf, KIND_ORDER, KIND_LABEL } from "./api.js";
+import { kindOf, isPending, KIND_ORDER, KIND_LABEL } from "./api.js";
 
 const DEFAULT_ENGINE_VOICE = { name: "", display_name: "Engine default", tags: [], duration_s: null };
 
 // Internal tags get plain words; tags with no entry here (fleet bookkeeping like clinical_ok) are not shown.
 const TAG_TEXT = {
-  "unverified-consent": ["Consent not checked yet", "flag"],
+  "consent-verified": ["Verified", "ok"],
+  "consent-pending": ["Under review", "flag"],
+  "consent-unchecked-self": ["Consent not checked", "flag"],
+  "unverified-consent": ["Under review", "flag"],
   uploaded: ["Uploaded", "plain"],
 };
 
@@ -55,6 +58,7 @@ export function voicePicker({ voices, value, onChange }) {
       const id = `voice-opt-${v.name || "default"}`;
       const input = h("input", { type: "radio", name: "voice", id, value: v.name });
       input.checked = v.name === current.name;
+      if (isPending(v)) input.disabled = true; // cannot speak until reviewed
       input.addEventListener("change", () => {
         current = v;
         paintCurrent();

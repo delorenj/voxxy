@@ -12,6 +12,7 @@ import sys
 
 import typer
 
+from voxxy.commands import consent as consent_commands
 from voxxy.commands import daemon as daemon_commands
 from voxxy.commands import engine as engine_commands
 from voxxy.commands import listen as listen_commands
@@ -33,12 +34,14 @@ engine_app = typer.Typer(help="Engine control: list, use, enable, disable, logs.
 voice_app = typer.Typer(help="Voice management: list, info, add, candidates, clone, isolate, delete, persona.")
 sink_app = typer.Typer(help="Sink relay: route audio to the machine you're at.")
 persona_app = typer.Typer(help="Voice personas: list, show, dry-run rewrites, generate.")
+consent_app = typer.Typer(help="Consent review queue (operator key): reviews, approve, reject, audio.")
 
 app.add_typer(daemon_app, name="daemon")
 app.add_typer(engine_app, name="engine")
 app.add_typer(voice_app, name="voice")
 app.add_typer(sink_app, name="sink")
 app.add_typer(persona_app, name="persona")
+app.add_typer(consent_app, name="consent")
 
 
 @app.callback()
@@ -73,6 +76,7 @@ setup_commands.register(app)
 engine_commands.register(engine_app)
 voice_commands.register(voice_app)
 persona_commands.register(persona_app)
+consent_commands.register(consent_app)
 listen_commands.register_sink(sink_app)
 daemon_commands.register(daemon_app)
 

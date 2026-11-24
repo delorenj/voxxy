@@ -1,14 +1,14 @@
 // Voice library: grouped cards with preview, use-in-Say and a confirmed delete.
 
 import { h, toast, fmtSeconds } from "./dom.js";
-import { synth, deleteVoice, explain, kindOf, KIND_ORDER, KIND_LABEL, getVoice, setVoice } from "./api.js";
+import { synth, deleteVoice, explain, kindOf, isPending, KIND_ORDER, KIND_LABEL, getVoice, setVoice } from "./api.js";
 import { state, loadVoices, invalidateVoices } from "./state.js";
 import { tagEls } from "./picker.js";
 import { playUrl } from "./player.js";
 
 const PREVIEW_LINE = "Hello, this is a short preview of how this voice sounds.";
 const GROUP_NOTE = {
-  own: "Recorded by a person reading a sentence aloud.",
+  own: "Recorded by a person reading a sentence aloud, then checked against that sentence and their voice.",
   designed: "Made from a description. No recording of anyone.",
   house: "Voices that ship with Voxxy.",
   other: "Everything else on this server.",
@@ -30,6 +30,12 @@ export function mountVoices(root, ctx) {
     const useBtn = h("button", { class: "btn btn--small", type: "button" }, "Say with it");
     const delBtn = h("button", { class: "btn btn--small btn--danger", type: "button" }, "Delete");
     const status = h("p", { class: "small muted", "aria-live": "polite" });
+    const pending = isPending(v);
+    if (pending) {
+      status.textContent = "Under review: a person is checking this recording. The voice can speak once it is approved.";
+      previewBtn.disabled = true;
+      useBtn.disabled = true;
+    }
 
     const setPreview = (label, isBusy) => {
       previewBtn.textContent = label;

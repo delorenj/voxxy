@@ -72,6 +72,11 @@ class VoiceRepo:
     async def close(self) -> None:
         await self._pool.close()
 
+    @property
+    def pool(self) -> asyncpg.Pool:
+        """The connection pool, shared with the consent store."""
+        return self._pool
+
     async def get(self, name: str) -> Optional[Voice]:
         row = await self._pool.fetchrow(
             f"SELECT {_VOICE_COLUMNS} FROM voices WHERE name = $1",
@@ -128,6 +133,22 @@ class VoiceRepo:
             name, persona,
         )
         return _row_to_voice(row) if row else None
+
+    async def set_tags(self, name: str, tags: list[str]) -> Optional[Voice]:
+        """Replace the voice's tags; None result means no such voice."""
+        row = await self._pool.fetchrow(
+            "UPDATE voices SET tags = $2, updated_at = now() WHERE name = $1 RETURNING " + _VOICE_COLUMNS,
+            name, tags,
+        )
+        return _row_to_voice(row) if row else None
+
+    async def retag(self, old: str, new: str) -> int:
+        """Swap tag ``old`` for ``new`` on every voice that has it (idempotent). Returns how many voices changed."""
+        res = await self._pool.execute(
+            "UPDATE voices SET tags = array_replace(tags, $1, $2), updated_at = now() WHERE $1 = ANY(tags)",
+            old, new,
+        )
+        return int(res.rsplit(" ", 1)[-1])
 
     async def delete(self, name: str) -> bool:
         res = await self._pool.execute("DELETE FROM voices WHERE name = $1", name)

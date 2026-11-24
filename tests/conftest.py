@@ -21,10 +21,12 @@ def _wav(
     channels: int = 1,
     subtype: str = "PCM_16",
     fmt: str = "WAV",
+    hz: float = 220.0,
 ) -> bytes:
-    """A short 220 Hz tone, encoded in memory. Shape knobs only; content is irrelevant."""
+    """A short tone (220 Hz unless ``hz``), encoded in memory. Shape knobs only; content is irrelevant,
+    except that the consent tests' fake speaker model tells "speakers" apart by the tone's pitch."""
     n = int(round(seconds * sr))
-    tone = (0.2 * np.sin(2 * np.pi * 220.0 * np.arange(n) / sr)).astype(np.float32)
+    tone = (0.2 * np.sin(2 * np.pi * hz * np.arange(n) / sr)).astype(np.float32)
     data = tone if channels == 1 else np.stack([tone] * channels, axis=1)
     buf = io.BytesIO()
     sf.write(buf, data, sr, format=fmt, subtype=subtype)
@@ -33,5 +35,5 @@ def _wav(
 
 @pytest.fixture
 def make_wav():
-    """``make_wav(seconds=2.0, sr=16000, channels=1, subtype="PCM_16", fmt="WAV") -> bytes``."""
+    """``make_wav(seconds=2.0, sr=16000, channels=1, subtype="PCM_16", fmt="WAV", hz=220.0) -> bytes``."""
     return _wav

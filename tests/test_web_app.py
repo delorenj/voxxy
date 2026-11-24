@@ -14,15 +14,18 @@ import subprocess
 from typing import Optional
 
 import pytest
+import soundfile as sf
 from fastapi.testclient import TestClient
 
 from app import consent as consent_mod
+from app import consent_store as consent_store_mod
 from app import edition as edition_mod
 from app import main
 from app import voices as voices_mod
 from app.auth import is_public_request
 from app.engines import DEFAULT_ENGINE_LANGUAGES, EngineOrchestrator, SynthResult
 from app.voices import Voice
+from consent_fakes import fake_load_audio, fake_providers
 
 
 class FakeVoxcpm:
@@ -58,6 +61,13 @@ class MemoryRepo:
         self.voices[name] = v
         return v
 
+    async def set_tags(self, name: str, tags: list[str]) -> Optional[Voice]:
+        v = self.voices.get(name)
+        if v is None:
+            return None
+        v.tags = list(tags)
+        return v
+
     async def delete(self, name: str) -> bool:
         return self.voices.pop(name, None) is not None
 
@@ -81,7 +91,13 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path, make_wav):
     monkeypatch.setattr(main, "_repo", repo)
     monkeypatch.setattr(main, "_engine", EngineOrchestrator(
         [engine], reference_engines=["voxcpm"], engine_languages=dict(DEFAULT_ENGINE_LANGUAGES)))
-    monkeypatch.setattr(main, "_challenges", consent_mod.ChallengeStore())
+    for var in ("VOX_OPERATOR_KEY", "VOX_CONSENT_DIR", "VOX_CONSENT_ACCEPT", "VOX_CONSENT_REJECT",
+                "VOX_CONSENT_PHRASE_OK", "VOX_CONSENT_PHRASE_REVIEW"):
+        monkeypatch.delenv(var, raising=False)
+    providers = fake_providers()
+    store = consent_store_mod.MemoryConsentStore()
+    monkeypatch.setattr(main, "_consent_gate", consent_mod.ConsentGate(store, providers))
+    monkeypatch.setattr(consent_mod.vp_mod, "load_audio_16k", fake_load_audio)
     monkeypatch.setattr(main.audio_codec, "to_ogg_opus", lambda wav, input_format=None: b"OggS-fake")
     monkeypatch.setattr(main.audio_cache, "put", lambda data: "abc123")
 
@@ -91,6 +107,7 @@ def env(monkeypatch: pytest.MonkeyPatch, tmp_path, make_wav):
 
     e = Env()
     e.engine, e.repo, e.dir, e.monkeypatch = engine, repo, tmp_path, monkeypatch  # type: ignore[attr-defined]
+    e.store, e.asr, e.embedder = store, providers.transcriber, providers.embedder  # type: ignore[attr-defined]
     return e
 
 
@@ -171,7 +188,8 @@ def test_app_config_defaults_to_hosted_and_strict(env) -> None:
     assert body["auth_required"] is False
     assert body["features"]["upload_clip"] is False
     assert body["features"]["real_name_check"] is True
-    assert body["features"]["consent_verification"] is False
+    assert body["features"]["consent_verification"] is True
+    assert body["features"]["consent_reference_upload"] is False
     assert body["public_base_url"].startswith("http")
 
 
@@ -359,6 +377,13 @@ def test_design_preview_refuses_real_people_too(env) -> None:
 
 # ------------------------------------------------------------------ consent challenge + POST /voices/own
 
+def _challenge(env) -> dict:
+    """A fresh challenge, with the fake ASR set to hear the sentence and the code read correctly."""
+    ch = env.client.post("/voices/consent/challenge").json()
+    env.asr.say(ch)
+    return ch
+
+
 def _own(env, challenge: dict, wav: bytes, *, name: str = "my-voice", display: str = "My voice", filename: str = "rec.wav"):
     return env.client.post(
         "/voices/own",
@@ -409,25 +434,28 @@ def test_challenge_store_is_bounded() -> None:
     assert len(store._items) <= consent_mod._MAX_OPEN
 
 
-def test_own_voice_is_stored_tagged_and_marked_unverified(env, make_wav) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
+def test_own_voice_is_stored_tagged_and_verified(env, make_wav) -> None:
+    ch = _challenge(env)
     r = _own(env, ch, make_wav(seconds=9.0, sr=16_000))
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["name"] == "my-voice"
-    assert body["tags"] == ["own", "unverified-consent"]
+    assert body["tags"] == ["own", "consent-verified"]
+    assert body["consent"] == "verified"
+    assert body["consent_result"]["decision"] == "accepted" and body["consent_result"]["usable"] is True
     assert body["duration_s"] == pytest.approx(9.0, abs=0.1)
     assert (env.dir / "my-voice.wav").is_file()
 
-    sidecar = json.loads((env.dir / "my-voice.consent.json").read_text())
-    assert sidecar["consent"] == "unverified-consent"
-    assert sidecar["challenge_id"] == ch["challenge_id"]
-    assert sidecar["code"] == ch["code"] and sidecar["sentence"] == ch["sentence"]
-    assert sidecar["checks"] == {"asr_transcript": "not_run", "speaker_match": "not_run"}
+    record = next(iter(env.store.records.values()))
+    assert record.id == body["consent_result"]["record_id"]
+    assert record.challenge_id == ch["challenge_id"]
+    assert record.code == ch["code"] and record.sentence == ch["sentence"]
+    assert record.decision == "accepted" and record.code_ok is True and record.phrase_score == 1.0
+    assert (env.dir / "_consent" / record.consent_audio_path).is_file()
 
 
 def test_own_voice_challenge_cannot_be_reused(env, make_wav) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     assert _own(env, ch, make_wav(seconds=9.0)).status_code == 200
     again = _own(env, ch, make_wav(seconds=9.0), name="second")
     assert again.status_code == 410
@@ -440,9 +468,8 @@ def test_own_voice_unknown_and_expired_challenges(env, make_wav, monkeypatch) ->
     assert r.status_code == 404
     assert r.headers["x-vox-error"] == "challenge_unknown"
 
-    ch = env.client.post("/voices/consent/challenge").json()
-    store = main._challenges
-    store._items[ch["challenge_id"]].expires_at = 0.0
+    ch = _challenge(env)
+    env.store.challenges._items[ch["challenge_id"]].expires_at = 0.0
     r = _own(env, ch, make_wav(seconds=9.0))
     assert r.status_code == 410
     assert r.headers["x-vox-error"] == "challenge_expired"
@@ -450,7 +477,7 @@ def test_own_voice_unknown_and_expired_challenges(env, make_wav, monkeypatch) ->
 
 
 def test_own_voice_too_short_is_refused_without_burning_the_challenge(env, make_wav) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     short = _own(env, ch, make_wav(seconds=3.0))
     assert short.status_code == 422
     assert "at least 8 seconds" in short.json()["detail"]
@@ -459,7 +486,7 @@ def test_own_voice_too_short_is_refused_without_burning_the_challenge(env, make_
 
 
 def test_own_voice_empty_and_unreadable_recordings(env) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     assert _own(env, ch, b"").status_code == 422
     r = _own(env, ch, b"this is not audio at all" * 50, filename="rec.webm")
     assert r.status_code == 422
@@ -468,7 +495,7 @@ def test_own_voice_empty_and_unreadable_recordings(env) -> None:
 
 
 def test_own_voice_will_not_take_over_another_voices_name(env, make_wav) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     r = _own(env, ch, make_wav(seconds=9.0), name="house-f1")
     assert r.status_code == 409
     assert env.repo.voices["house-f1"].tags == ["house"]
@@ -477,15 +504,23 @@ def test_own_voice_will_not_take_over_another_voices_name(env, make_wav) -> None
 
 
 def test_own_voice_rejects_unsafe_names(env, make_wav) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     assert _own(env, ch, make_wav(seconds=9.0), name="../../etc/passwd").status_code == 422
 
 
-def test_own_voice_trims_long_recordings(env, make_wav) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
-    r = _own(env, ch, make_wav(seconds=40.0, sr=8_000))
-    assert r.status_code == 200
+def test_own_voice_trims_timer_jitter_before_the_gate_and_refuses_anything_longer(env, make_wav) -> None:
+    """A second of jitter past 30 s is trimmed BEFORE the gate, so what is judged is what the voice is made
+    from; a longer clip is refused outright (the gate never sees audio it could not have judged)."""
+    ch = _challenge(env)
+    r = _own(env, ch, make_wav(seconds=30.6, sr=8_000))
+    assert r.status_code == 200, r.text
     assert r.json()["duration_s"] == pytest.approx(main.REF_AUDIO_MAX_SECONDS, abs=0.1)
+    kept = next(iter(env.store.records.values()))
+    assert sf.info(env.dir / "_consent" / kept.consent_audio_path).duration == pytest.approx(30.0, abs=0.1)
+    ch = _challenge(env)
+    long = _own(env, ch, make_wav(seconds=40.0, sr=8_000))
+    assert long.status_code == 422 and "keep it under 30" in long.json()["detail"]
+    assert len(env.store.records) == 1                       # refused before the gate: challenge unspent
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
@@ -500,7 +535,7 @@ def test_own_voice_accepts_a_browser_container_via_ffmpeg(env, make_wav, tmp_pat
     )
     if proc.returncode != 0:
         pytest.skip("this ffmpeg cannot write webm/opus")
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     r = _own(env, ch, out.read_bytes(), filename="recording.webm")
     assert r.status_code == 200, r.text
     assert r.json()["duration_s"] == pytest.approx(9.0, abs=0.3)
@@ -518,13 +553,14 @@ def test_plain_upload_still_works_in_the_hosted_edition(env, make_wav) -> None:
     assert (env.dir / "fleet-voice.wav").is_file()
 
 
-def test_deleting_an_own_voice_removes_its_consent_record(env, make_wav) -> None:
-    ch = env.client.post("/voices/consent/challenge").json()
+def test_deleting_an_own_voice_keeps_its_consent_record(env, make_wav) -> None:
+    ch = _challenge(env)
     assert _own(env, ch, make_wav(seconds=9.0)).status_code == 200
-    assert (env.dir / "my-voice.consent.json").exists()
     assert env.client.delete("/voices/my-voice").status_code == 200
-    assert not (env.dir / "my-voice.consent.json").exists()
     assert not (env.dir / "my-voice.wav").exists()
+    # the consent record and its audio outlive the voice (product doc 4.1 step 6)
+    record = next(iter(env.store.records.values()))
+    assert (env.dir / "_consent" / record.consent_audio_path).is_file()
 
 
 # ------------------------------------------------------------------ review fixes
@@ -543,7 +579,7 @@ def test_a_description_that_is_blank_after_tidying_is_422_not_500(env, monkeypat
 
 def test_a_display_name_of_only_spaces_is_refused(env, make_wav) -> None:
     assert env.client.post("/voices/design", json={**DESIGN, "display_name": "   "}).status_code == 422
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     r = _own(env, ch, make_wav(seconds=9.0), display="   ")
     assert r.status_code == 422
     # the refusal did not burn the challenge
@@ -587,7 +623,7 @@ def test_post_voices_decodes_formats_soundfile_cannot_read(env, make_wav, tmp_pa
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 def test_an_mp4_with_the_moov_atom_at_the_end_still_decodes(env, make_wav, tmp_path) -> None:
     data = _webm(make_wav, tmp_path, ".mp4")  # ffmpeg's default for mp4 puts moov last
-    ch = env.client.post("/voices/consent/challenge").json()
+    ch = _challenge(env)
     r = _own(env, ch, data, filename="recording.mp4")
     assert r.status_code == 200, r.text
     assert r.json()["duration_s"] == pytest.approx(9.0, abs=0.3)

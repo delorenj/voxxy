@@ -8,6 +8,7 @@ import {
 import { state, loadVoices, invalidateVoices } from "./state.js";
 import { micSupport, micErrorText, startRecording, toWav } from "./recorder.js";
 import { createPlayer } from "./player.js";
+import { sampleStep } from "./sample.js";
 
 const EXAMPLES = [
   "A calm woman in her forties, slow and warm, with a light Irish accent",
@@ -69,23 +70,52 @@ function errorBox() {
   };
 }
 
-function savedPanel({ title, note, onAgain, voiceName }) {
+function savedPanel({ title, note, onAgain, voiceName, usable = true }) {
   const say = h("button", { class: "btn btn--primary", type: "button" }, "Say something with it");
   say.addEventListener("click", () => { setVoice(voiceName); location.hash = "#/say"; });
   const again = h("button", { class: "btn", type: "button" }, "Make another");
   again.addEventListener("click", onAgain);
+  const library = h("a", { class: usable ? "btn" : "btn btn--primary", href: "#/voices" }, usable ? "See all voices" : "See it in the library");
   const box = h("div", { class: "stack", role: "status" },
     h("h2", { tabindex: "-1" }, title),
     note ? h("p", { class: "muted" }, note) : null,
-    h("div", { class: "row" }, say, h("a", { class: "btn", href: "#/voices" }, "See all voices"), again));
+    h("div", { class: "row" }, usable ? say : null, library, again));
   queueMicrotask(() => box.querySelector("h2")?.focus());
   return box;
 }
 
 // ---------------------------------------------------------------- record your own
 
-function recordPath({ done }) {
+// What the consent check said about a saved voice, in plain words, as a saved-panel.
+function ownVoiceSaved(voice, onAgain) {
+  const result = voice.consent_result || {};
+  const base = { voiceName: voice.name, onAgain };
+  if (result.state === "pending") {
+    return savedPanel({
+      ...base, usable: false,
+      title: `“${voice.display_name}” is saved and waiting for a quick check`,
+      note: "A person will listen to your recording before the voice can speak. You will see it in your library marked Under review, and it becomes available once it is approved.",
+    });
+  }
+  if (result.state === "unchecked") {
+    return savedPanel({
+      ...base,
+      title: `“${voice.display_name}” is saved`,
+      note: result.warning
+        ? `The consent check did not confirm this recording (${result.warning}). On this self-hosted server the voice is saved anyway; making sure it is yours is up to you.`
+        : "The consent check did not run on this recording. On this self-hosted server the voice is saved anyway.",
+    });
+  }
+  return savedPanel({
+    ...base,
+    title: `“${voice.display_name}” is saved and verified`,
+    note: "Your recording matched the sentence, the code and your voice. It is ready to use.",
+  });
+}
+
+function recordPath({ done, edition }) {
   const name = nameField({ kind: "own", hint: "What you will call this voice." });
+  const sample = sampleStep({ allowUpload: edition !== "hosted" });
   const flow = h("div", { class: "steps" });
   const errors = errorBox();
   const stepEl = (state_, title, body) =>
@@ -142,6 +172,7 @@ function recordPath({ done }) {
     if (rec?.url) URL.revokeObjectURL(rec.url);
     rec = null;
     challenge = null;
+    sample.clear();
     phase = "start";
     render();
     if (message) errors.show(message);
@@ -224,6 +255,7 @@ function recordPath({ done }) {
     const v = name.value();
     if (!v) return;
     errors.hide();
+    if (sample.isRecording()) { errors.show("Finish the longer sample first, or remove it, then press Save voice."); return; }
     await busy(btn, "Saving…", async () => {
       const fd = new FormData();
       fd.append("challenge_id", challenge.challenge_id);
@@ -233,18 +265,20 @@ function recordPath({ done }) {
       const type = rec.blob.type || "";
       const ext = rec.wav ? "wav" : type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
       fd.append("audio", file, `recording.${ext}`);
+      const longer = sample.get();
+      if (longer) fd.append("reference", longer.blob, longer.name);
       try {
         const voice = await saveOwnVoice(fd);
         invalidateVoices();
         clearInterval(expiryTimer);
-        done(savedPanel({
-          title: `“${voice.display_name}” is saved`,
-          note: "The consent check, which matches your words and your voice against the sentence, is not running yet, so this voice is saved as “consent not checked yet”.",
-          voiceName: voice.name,
-          onAgain: () => done(null),
-        }));
+        done(ownVoiceSaved(voice, () => done(null)));
       } catch (err) {
-        if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
+        if (err instanceof ApiError && err.code === "consent_rejected") {
+          // The check ran and did not accept this recording. The sentence is used up: a new one is needed.
+          resetToStart(`Your voice was not added this time. ${err.message}`);
+        } else if (err instanceof ApiError && err.code === "consent_unavailable") {
+          errors.show("The consent check is not available right now, so your voice was not saved. Your sentence is still good; press Save voice again in a moment.");
+        } else if (err instanceof ApiError && (err.status === 404 || err.status === 410)) {
           resetToStart(`${err.message} Your recording was not saved; get a new sentence and record it again.`);
         } else if (err instanceof ApiError && err.status === 409) {
           errors.show(`${err.message}. Change the name above, then press Save voice again.`);
@@ -267,7 +301,7 @@ function recordPath({ done }) {
       const get = h("button", { class: "btn btn--primary", type: "button" }, "Get my sentence");
       get.addEventListener("click", () => busy(get, "Getting…", getChallenge));
       s2 = stepEl("active", "Get your sentence", h("div", { class: "stack" },
-        h("p", { class: "muted" }, "You will read one sentence and a short code aloud, live. The code stops anyone using an old recording."),
+        h("p", { class: "muted" }, "You will read one sentence and a short code aloud, live. Voxxy checks that you said both and that the voice matches, so only your own voice can be added. The code stops anyone using an old recording."),
         h("div", {}, get)));
     } else {
       const fresh = h("button", { class: "btn btn--small", type: "button" }, "Different sentence");
@@ -293,7 +327,7 @@ function recordPath({ done }) {
       start.addEventListener("click", begin);
       if (!support.ok) start.setAttribute("aria-disabled", "true");
       s3 = stepEl("active", "Record it", h("div", { class: "stack" },
-        h("p", { class: "muted" }, `Find a quiet spot. Read the sentence, then the code. It needs at least ${minS()} seconds and stops at ${maxS()}.`),
+        h("p", { class: "muted" }, `Find a quiet spot. Read the whole sentence, then the six digits of the code. It needs at least ${minS()} seconds and stops at ${maxS()}.`),
         support.ok ? null : h("p", { class: "notice notice--error", role: "alert" }, support.reason),
         h("div", {}, start)));
     } else if (phase === "recording") {
@@ -322,7 +356,12 @@ function recordPath({ done }) {
       s3 = stepEl("done", `Recorded (${fmtSeconds(rec.seconds)})`, null);
     }
 
-    // step 4: check and save
+    // step 4 (optional): a longer sample to make the voice from
+    const s4a = phase === "review" || phase === "saving"
+      ? stepEl("active", "Add a longer sample (optional)", sample.el)
+      : stepEl("idle", "Add a longer sample (optional)", h("p", { class: "muted" }, "After your recording you can add a longer one to make the voice sound closer."));
+
+    // step 5: check and save
     let s4;
     if (phase === "review" || phase === "saving") {
       player = createPlayer({ src: rec.url, durationHint: rec.seconds, autoplay: false, downloadName: "my-voice.wav", meta: [h("span", {}, "Your recording")] });
@@ -337,7 +376,7 @@ function recordPath({ done }) {
       s4 = stepEl("idle", "Listen, then save", h("p", { class: "muted" }, "You can play your recording back before it is saved."));
     }
 
-    flow.replaceChildren(nameStep, s2, s3, s4);
+    flow.replaceChildren(nameStep, s2, s3, s4a, s4);
     // errors sit inside whichever step the person is working in
     const actives = [...flow.querySelectorAll('.step[data-state="active"]')];
     actives[actives.length - 1].querySelector(".step__body").append(errors.el);
@@ -357,6 +396,7 @@ function recordPath({ done }) {
       disposed = true;
       controller?.cancel();
       clearInterval(expiryTimer);
+      sample.destroy();
       if (player) player.destroy();
       if (rec?.url) URL.revokeObjectURL(rec.url);
     },
