@@ -90,6 +90,9 @@ def test_contents_follow_the_pricing_doc(built):
     assert not {"voxxy/clone.py", "voxxy/commands/voice_clone.py", "voxxy/commands/persona.py"} & set(names)
     assert "EDITION = 'self'" in bundle_mod and "DEFAULT_URL = 'http://127.0.0.1:8000'" in bundle_mod
     assert "uv:latest" not in (stage / "engines" / "voxcpm" / "Dockerfile").read_text()
+    release = json.loads((stage / "core" / "RELEASE.json").read_text())
+    assert release["version"] == (stage / "VERSION").read_text().strip() and isinstance(release["released_at"], int)
+    assert "COPY RELEASE.json" in (stage / "core" / "Dockerfile").read_text()
 
 
 def test_tarball_is_reproducible(built, tmp_path):

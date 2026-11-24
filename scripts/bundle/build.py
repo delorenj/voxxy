@@ -242,7 +242,7 @@ def build(manifest_path: Path, out: Path | None = None, *, wheel: bool = True) -
     info = git_info(root, source_paths(manifest, manifest_path, root))
     stamp = int(subprocess.run(["git", "log", "-1", "--format=%ct"], cwd=root, capture_output=True, text=True)
                 .stdout.strip() or 0)
-    for rel in manifest.get("release_files", []):
+    for rel in b.get("release_files", []):
         # When this release came out (the source commit's time), read by the license check.
         (stage / rel).write_text(json.dumps({"version": b["version"], "released_at": stamp}) + "\n")
     write_index(stage, {
