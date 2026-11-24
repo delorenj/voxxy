@@ -651,3 +651,22 @@ def test_ui_version_is_served_and_follows_the_web_files(env, monkeypatch, tmp_pa
     assert main.ui_version() == v, "same files, same version"
     (web / "ui" / "make.js").write_text((web / "ui" / "make.js").read_text() + "\n// changed\n")
     assert main.ui_version() != v, "a changed file is a new version"
+
+
+def test_ui_version_ignores_unserved_files_and_survives_a_missing_web_dir(monkeypatch, tmp_path) -> None:
+    web = tmp_path / "web"
+    shutil.copytree(main.WEB_DIR, web)
+    monkeypatch.setattr(main, "WEB_DIR", web)
+    monkeypatch.setattr(main, "_ui_version_cache", None)
+    v = main.ui_version()
+    (web / "ui" / ".make.js.swp").write_bytes(b"editor junk")
+    (web / "notes.txt").write_text("not served")
+    assert main.ui_version() == v, "files the server does not serve do not make a new version"
+    monkeypatch.setattr(main, "WEB_DIR", tmp_path / "nowhere")
+    monkeypatch.setattr(main, "_ui_version_cache", None)
+    assert main.ui_version() == ""
+
+
+def test_healthz_carries_the_ui_version(env) -> None:
+    body = env.client.get("/healthz").json()
+    assert body["ui_version"] == env.client.get("/app-config").json()["ui_version"] != ""

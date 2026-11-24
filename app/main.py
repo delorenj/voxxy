@@ -670,20 +670,28 @@ _ui_version_cache: tuple[tuple, str] | None = None
 
 
 def ui_version() -> str:
-    """A short hash of the web app's files. An open page compares it with the one it booted with, so a
-    tab left open across a deploy can say "reload" instead of running old code against a new server.
-    Rehashed only when a file's size or mtime changes; "" when no web app is bundled."""
+    """A short hash of the web app's served files (index.html and ui/**, no dotfiles). An open page
+    compares it with the one it booted with, so a tab left open across a deploy can say "reload"
+    instead of running old code against a new server. Rehashed only when a file's size or mtime
+    changes; a file vanishing mid-read keeps the last value, so /healthz never fails over it.
+    "" when no web app is bundled."""
     global _ui_version_cache
-    files = sorted(p for p in WEB_DIR.rglob("*") if p.is_file()) if WEB_DIR.is_dir() else []
-    sig = tuple((str(p), st.st_size, st.st_mtime_ns) for p in files for st in [p.stat()])
-    if _ui_version_cache and _ui_version_cache[0] == sig:
-        return _ui_version_cache[1]
-    if not files:
-        return ""
-    h = hashlib.sha256()
-    for p in files:
-        h.update(str(p.relative_to(WEB_DIR)).encode() + b"\0" + p.read_bytes() + b"\0")
-    _ui_version_cache = (sig, h.hexdigest()[:12])
+    try:
+        files = [WEB_DIR / "index.html"] if (WEB_DIR / "index.html").is_file() else []
+        if (WEB_DIR / "ui").is_dir():
+            files += sorted(p for p in (WEB_DIR / "ui").rglob("*")
+                            if p.is_file() and not any(part.startswith(".") for part in p.relative_to(WEB_DIR).parts))
+        sig = tuple((str(p), st.st_size, st.st_mtime_ns) for p in files for st in [p.stat()])
+        if _ui_version_cache and _ui_version_cache[0] == sig:
+            return _ui_version_cache[1]
+        if not files:
+            return ""
+        h = hashlib.sha256()
+        for p in files:
+            h.update(str(p.relative_to(WEB_DIR)).encode() + b"\0" + p.read_bytes() + b"\0")
+        _ui_version_cache = (sig, h.hexdigest()[:12])
+    except OSError:
+        return _ui_version_cache[1] if _ui_version_cache else ""
     return _ui_version_cache[1]
 
 

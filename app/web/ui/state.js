@@ -70,5 +70,8 @@ export async function refreshHealth() {
 export function startHealthPolling(ms = 30000) {
   refreshHealth();
   const id = setInterval(() => { if (!document.hidden) refreshHealth(); }, ms);
-  return () => clearInterval(id);
+  // A tab coming back (often after a night and a deploy) checks at once, before anyone presses Save.
+  const onVisible = () => { if (!document.hidden) refreshHealth(); };
+  document.addEventListener("visibilitychange", onVisible);
+  return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVisible); };
 }
