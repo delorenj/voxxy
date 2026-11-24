@@ -223,6 +223,10 @@ main {
 .field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .field > label, .field > .label, legend.label { font-weight: 600; font-size: 0.9375rem; }
 .hint { color: var(--ink-2); font-size: 0.875rem; }
+.release { gap: 10px; }
+.release__text { margin: 0; color: var(--ink-2); font-size: 0.9375rem; }
+.release__accept { display: flex; align-items: flex-start; gap: 10px; cursor: pointer; font-weight: 600; }
+.release__accept input { margin-top: 3px; flex: none; width: 1.125rem; height: 1.125rem; }
 input[type="text"], input[type="search"], input[type="password"], input[type="file"], textarea {
   width: 100%; min-height: 44px; padding: 10px 12px;
   border: 1px solid var(--control); border-radius: var(--radius-sm);

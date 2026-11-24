@@ -17,6 +17,7 @@ from starlette.exceptions import HTTPException
 from app import asr as asr_mod
 from app import auth as auth_mod
 from app import consent as consent_mod
+from app import edition as edition_mod
 from app import main
 from app.auth import principal_for
 from app.consent import ACCEPTED, REJECTED, REVIEW, Thresholds, decide
@@ -225,13 +226,14 @@ def _challenge(env) -> dict:  # noqa: F811
 
 
 def _own(env, ch: dict, make_wav, *, name="my-voice", hz=220.0, seconds=9.0, reference=None, ref_hz=220.0,
-         ref_seconds=12.0, headers=None):
+         ref_seconds=12.0, headers=None, release="true"):
     files = {"audio": ("rec.wav", make_wav(seconds=seconds, hz=hz), "audio/wav")}
     if reference:
         files["reference"] = ("long.wav", make_wav(seconds=ref_seconds, hz=ref_hz), "audio/wav")
     return env.client.post(
         "/voices/own", headers=headers or {},
-        data={"challenge_id": ch["challenge_id"], "name": name, "display_name": name.title()}, files=files)
+        data={"challenge_id": ch["challenge_id"], "name": name, "display_name": name.title(),
+              **({"release_accepted": release} if release is not None else {})}, files=files)
 
 
 def _records(env):
@@ -253,7 +255,7 @@ def test_first_accepted_own_voice_fixes_the_account_voiceprint(env, make_wav) ->
     assert vp.embedding_model == "fake-titanet" and vp.source_record == _records(env)[0].id
     rec = _records(env)[0]
     assert rec.speaker_score_account is None and rec.speaker_score_reference is None  # nothing to compare yet
-    assert rec.terms_version == "draft-1" and rec.edition == "hosted" and rec.embedding_model == "fake-titanet"
+    assert rec.terms_version == "draft-1+release-draft-1" and rec.edition == "hosted" and rec.embedding_model == "fake-titanet"
     assert rec.transcript.startswith(SENTENCE[:10]) or rec.transcript
 
 
@@ -677,3 +679,51 @@ def test_v1_unverified_voices_are_retagged_at_startup(env, monkeypatch, edition,
     monkeypatch.setenv("VOX_EDITION", edition)
     asyncio.run(main._retag_legacy_consent())
     assert repo.calls == [("unverified-consent", expected)]
+
+
+# ------------------------------------------------------------------ the biometric release (hosted)
+
+def test_hosted_refuses_own_voice_without_the_release_and_keeps_the_challenge(env, make_wav) -> None:
+    ch = _challenge(env)
+    for value in (None, "", "false", "0", "no", "off"):
+        r = _own(env, ch, make_wav, release=value)
+        assert r.status_code == 422, value
+        assert r.headers["x-vox-error"] == "release_required"
+        assert "accept" in r.json()["detail"]
+    assert _records(env) == [] and "my-voice" not in env.repo.voices
+    # the challenge was not used up: the same one works once the release is accepted
+    r = _own(env, ch, make_wav)
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("value", ["true", "1", "on", "yes", "TRUE", " Yes "])
+def test_hosted_accepts_any_yes_form_of_the_release(env, make_wav, value) -> None:
+    assert _own(env, _challenge(env), make_wav, release=value).status_code == 200
+
+
+def test_release_is_checked_before_any_audio_is_processed(env, make_wav) -> None:
+    # a challenge that does not exist and audio that is not audio: the release answer still comes first
+    r = env.client.post("/voices/own", data={"challenge_id": "never-issued", "name": "x", "display_name": "X"},
+                        files={"audio": ("rec.wav", b"not audio", "audio/wav")})
+    assert r.status_code == 422 and r.headers["x-vox-error"] == "release_required"
+
+
+def test_accepted_release_version_is_part_of_the_consent_record(env, make_wav) -> None:
+    assert _own(env, _challenge(env), make_wav).status_code == 200
+    assert _records(env)[0].terms_version == f"draft-1+release-{edition_mod.CONSENT_RELEASE_VERSION}"
+
+
+def test_self_edition_ignores_the_release(env, make_wav, monkeypatch) -> None:
+    monkeypatch.setenv("VOX_EDITION", "self")
+    r = _own(env, _challenge(env), make_wav, release=None)
+    assert r.status_code == 200, r.text
+    assert _records(env)[0].terms_version == "draft-1"
+
+
+def test_app_config_carries_the_release_in_hosted_only(env, monkeypatch) -> None:
+    body = env.client.get("/app-config").json()
+    assert body["consent_release"] == {
+        "version": edition_mod.CONSENT_RELEASE_VERSION, "text": edition_mod.CONSENT_RELEASE_TEXT}
+    assert "30 days" in body["consent_release"]["text"] and "12 months" in body["consent_release"]["text"]
+    monkeypatch.setenv("VOX_EDITION", "self")
+    assert env.client.get("/app-config").json()["consent_release"] is None

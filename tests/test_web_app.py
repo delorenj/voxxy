@@ -191,6 +191,7 @@ def test_app_config_defaults_to_hosted_and_strict(env) -> None:
     assert body["features"]["consent_verification"] is True
     assert body["features"]["consent_reference_upload"] is False
     assert body["public_base_url"].startswith("http")
+    assert set(body["consent_release"]) == {"version", "text"} and body["consent_release"]["text"]
 
 
 def test_app_config_self_edition_offers_upload(env, monkeypatch) -> None:
@@ -199,6 +200,7 @@ def test_app_config_self_edition_offers_upload(env, monkeypatch) -> None:
     assert body["edition"] == "self"
     assert body["features"]["upload_clip"] is True
     assert body["features"]["real_name_check"] is False
+    assert body["consent_release"] is None
 
 
 @pytest.mark.parametrize("raw", ["", "HOSTED", "enterprise", "selfhosted", " "])
@@ -387,7 +389,8 @@ def _challenge(env) -> dict:
 def _own(env, challenge: dict, wav: bytes, *, name: str = "my-voice", display: str = "My voice", filename: str = "rec.wav"):
     return env.client.post(
         "/voices/own",
-        data={"challenge_id": challenge["challenge_id"], "name": name, "display_name": display},
+        data={"challenge_id": challenge["challenge_id"], "name": name, "display_name": display,
+              "release_accepted": "true"},
         files={"audio": (filename, wav, "audio/wav")},
     )
 

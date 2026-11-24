@@ -515,7 +515,17 @@ def consent_dir() -> Path:
 
 
 def terms_version() -> str:
-    return os.environ.get("VOX_TERMS_VERSION", "").strip() or "draft-1"
+    """The terms version stored on every consent record (no DB column for the release, by design).
+
+    In the hosted edition the person accepted the biometric release before recording
+    (``POST /voices/own`` refuses without ``release_accepted``), so the version also covers it:
+    ``<terms>+release-<release version>``, e.g. ``draft-1+release-draft-1``. The self edition has no
+    release, so it stays the bare terms version.
+    """
+    terms = os.environ.get("VOX_TERMS_VERSION", "").strip() or "draft-1"
+    if edition_mod.is_hosted():
+        return f"{terms}+release-{edition_mod.CONSENT_RELEASE_VERSION}"
+    return terms
 
 
 @dataclass

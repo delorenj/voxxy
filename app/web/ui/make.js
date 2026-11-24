@@ -116,6 +116,8 @@ function ownVoiceSaved(voice, onAgain) {
 function recordPath({ done, edition }) {
   const name = nameField({ kind: "own", hint: "What you will call this voice." });
   const sample = sampleStep({ allowUpload: edition !== "hosted" });
+  // The hosted edition asks for a biometric release before a voice is recorded and stored.
+  const release = edition !== "self" && state.config?.consent_release ? state.config.consent_release : null;
   const flow = h("div", { class: "steps" });
   const errors = errorBox();
   const stepEl = (state_, title, body) =>
@@ -132,6 +134,8 @@ function recordPath({ done, edition }) {
   let expiryTimer = null;
   let disposed = false;
   let live = {}; // nodes updated while recording
+  let accepted = false; // the person ticked the release; kept across re-renders
+  let releaseBox = null; // the "I accept" checkbox, rebuilt with the save step
 
   const support = micSupport();
   const minS = () => challenge?.record_min_seconds ?? 8;
@@ -255,12 +259,14 @@ function recordPath({ done, edition }) {
     const v = name.value();
     if (!v) return;
     errors.hide();
+    if (release && !accepted) { errors.show("Tick the box to accept the notice before saving your voice."); releaseBox?.focus(); return; }
     if (sample.isRecording()) { errors.show("Finish the longer sample first, or remove it, then press Save voice."); return; }
     await busy(btn, "Saving…", async () => {
       const fd = new FormData();
       fd.append("challenge_id", challenge.challenge_id);
       fd.append("name", v.slug);
       fd.append("display_name", v.display);
+      if (release) fd.append("release_accepted", "true");
       const file = rec.wav ? rec.wav.blob : rec.blob;
       const type = rec.blob.type || "";
       const ext = rec.wav ? "wav" : type.includes("mp4") ? "m4a" : type.includes("ogg") ? "ogg" : "webm";
@@ -273,7 +279,10 @@ function recordPath({ done, edition }) {
         clearInterval(expiryTimer);
         done(ownVoiceSaved(voice, () => done(null)));
       } catch (err) {
-        if (err instanceof ApiError && err.code === "consent_rejected") {
+        if (err instanceof ApiError && err.code === "release_required") {
+          errors.show("Please read the notice above and tick the box to accept it, then press Save voice again. Your recording is still here.");
+          releaseBox?.focus();
+        } else if (err instanceof ApiError && err.code === "consent_rejected") {
           // The check ran and did not accept this recording. The sentence is used up: a new one is needed.
           resetToStart(`Your voice was not added this time. ${err.message}`);
         } else if (err instanceof ApiError && err.code === "consent_unavailable") {
@@ -369,8 +378,21 @@ function recordPath({ done, edition }) {
       again.addEventListener("click", () => resetKeepChallenge());
       const saveBtn = h("button", { class: "btn btn--primary", type: "button" }, "Save voice");
       saveBtn.addEventListener("click", () => save(saveBtn));
+      let releaseEl = null;
+      releaseBox = null;
+      if (release) {
+        const wasChecked = accepted;
+        releaseBox = h("input", { type: "checkbox", id: "release-accept", "aria-describedby": "release-text" });
+        releaseBox.checked = wasChecked;
+        saveBtn.disabled = !wasChecked;
+        releaseBox.addEventListener("change", () => { accepted = releaseBox.checked; saveBtn.disabled = !accepted; });
+        releaseEl = h("div", { class: "field release" },
+          h("p", { class: "release__text", id: "release-text" }, release.text),
+          h("label", { class: "release__accept", for: "release-accept" }, releaseBox, h("span", {}, "I have read this and I accept it.")));
+      }
       s4 = stepEl("active", "Listen, then save", h("div", { class: "stack" },
         h("div", { class: "panel" }, player.el),
+        releaseEl,
         h("div", { class: "row" }, saveBtn, again)));
     } else {
       s4 = stepEl("idle", "Listen, then save", h("p", { class: "muted" }, "You can play your recording back before it is saved."));

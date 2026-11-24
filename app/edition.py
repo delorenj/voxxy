@@ -33,6 +33,29 @@ def is_hosted() -> bool:
     return current_edition() == EDITION_HOSTED
 
 
+# ------------------------------------------------------- biometric release (hosted)
+
+# DRAFT wording: Jarad approves the final text. This is the one source for the release the hosted
+# edition shows before a person records their own voice, and for its version. Change the text, bump
+# the version: ``consent.terms_version()`` folds the version into every consent record. Nothing here
+# claims the retention purge is automated; the text only states the promise.
+CONSENT_RELEASE_VERSION = "draft-1"
+CONSENT_RELEASE_TEXT = (
+    "We keep your recording and a voice measurement (a voiceprint) to check that the voices on your "
+    "account are yours. We use them for nothing else, and we never sell or share them. "
+    "We delete voiceprints within 30 days of you deleting the voice or your account, and the consent "
+    "recordings 12 months after the voice is deleted. "
+    "By continuing you confirm the voice is your own."
+)
+
+_RELEASE_YES = {"true", "1", "on", "yes"}
+
+
+def release_accepted(value: str | None) -> bool:
+    """True when a ``release_accepted`` form value is an explicit yes (true/1/on/yes)."""
+    return (value or "").strip().lower() in _RELEASE_YES
+
+
 # ---------------------------------------------------------------- name check
 
 # "sounds like X", "voice of X", "impression of X", ... Each is followed by the thing the voice

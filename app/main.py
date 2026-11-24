@@ -693,6 +693,11 @@ async def app_config(request: Request) -> dict:
             "consent_reference_upload": not hosted,  # a longer sample may be uploaded, not only recorded
             "sink": True,
         },
+        # the biometric release the hosted edition shows before recording; the self edition has none
+        "consent_release": {
+            "version": edition_mod.CONSENT_RELEASE_VERSION,
+            "text": edition_mod.CONSENT_RELEASE_TEXT,
+        } if hosted else None,
     }
 
 
@@ -1473,6 +1478,8 @@ async def create_own_voice(
     display_name: str = Form(..., min_length=1, max_length=80),
     audio: UploadFile = File(..., description="A live recording of the challenge sentence and code"),
     reference: Optional[UploadFile] = File(None, description="Optional longer sample (10-30 s) to make the voice from"),
+    release_accepted: Optional[str] = Form(
+        None, description="Hosted edition: must be true/1/on/yes, the person accepted the biometric release"),
 ) -> OwnVoiceOut:
     """Add the caller's own voice from a live recording of a challenge sentence and code, through the
     consent gate (app/consent.py): ASR checks the sentence and code, speaker embeddings check the
@@ -1485,9 +1492,15 @@ async def create_own_voice(
     - consent models unavailable: 503, the challenge is not used up.
     - self edition: the same checks run and are recorded, but a failed check only adds ``warning``; the
       voice is made, tagged ``consent-unchecked-self``.
+    - hosted edition without ``release_accepted``: 422 ``release_required``, before the challenge is
+      looked at (so it is not used up) and before any audio is read. The self edition ignores the field.
 
     The voice is made from ``reference`` when given, otherwise from the consent recording.
     """
+    if edition_mod.is_hosted() and not edition_mod.release_accepted(release_accepted):
+        raise HTTPException(
+            422, "Please read and accept the notice about how your recording and voiceprint are kept, then try again.",
+            headers={"X-Vox-Error": "release_required"})
     slug = _voice_slug(name)
     display_name = display_name.strip()
     if not display_name:
