@@ -401,6 +401,12 @@ New gaps these decisions add: a consent-data purge job and the biometric release
 the waitlist on the store page (G9), moving personas and `voice_clone` to a private repo (G4),
 "second refusal goes to review" (G5), and an EU/EEA exclusion at checkout (G9).
 
+Done 2026-11-23: the waitlist is the store's catalog sign-up on a new `/voxxy/` preview page
+(store `43478f6`, form-intake `store-notify`, `product=voxxy`; read it with
+`form_intake.py list --form store-notify --field product=voxxy --emails`), with a Voxxy card on
+the store home and the 33GOD front shelf; "second refusal goes to review" is live (voxxy
+`0b4b266`). G8 (`.launch.yaml`) is owner-edited only, so it is proposed, not written.
+
 ### The questions as originally asked
 
 | # | Decision | Recommendation | Default |
