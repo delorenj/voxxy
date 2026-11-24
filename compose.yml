@@ -40,6 +40,8 @@ services:
       VOX_CONSENT_REVIEW_FIRST: ${VOX_CONSENT_REVIEW_FIRST:-1}
       VOX_CONSENT_PRELOAD: ${VOX_CONSENT_PRELOAD:-1}
       VOX_TERMS_VERSION: ${VOX_TERMS_VERSION:-draft-1}
+      # The 33GOD Bloodbank bus (NATS): a voice held for review becomes an operator push. Empty = off.
+      VOX_BLOODBANK_NATS_URL: ${VOX_BLOODBANK_NATS_URL:-}
       # Default destination for the speak_sink MCP tool, so a fleet agent can
       # reach whoever is listening without knowing the sink name. Empty means
       # callers must pass one explicitly.

@@ -74,6 +74,7 @@ from app import consent as consent_mod
 from app import consent_store as consent_store_mod
 from app import edition as edition_mod
 from app import license as license_mod
+from app import operator_notify
 from app import voices as voices_mod
 from app.auth import (
     ApiKeyAuthMiddleware,
@@ -1616,6 +1617,10 @@ async def create_own_voice(
         if reference_src:
             Path(reference_src).unlink(missing_ok=True)
     logger.info("consent %s voice=%s record=%s seconds=%.1f", outcome.decision, slug, outcome.record.id, duration)
+    if outcome.state == "pending":
+        # held for a person: tell the operator, or it waits until someone happens to look
+        operator_notify.review_requested(record_id=outcome.record.id, voice=slug, display_name=display_name,
+                                         reason=outcome.reason or "")
     return OwnVoiceOut(
         **VoiceOut.from_model(v).model_dump(),
         consent_result=ConsentOut(
@@ -1765,6 +1770,7 @@ async def resolve_consent_review(record_id: str, body: ReviewIn, request: Reques
         else:
             await _repo.delete(voice.name)
             voice.abs_path.unlink(missing_ok=True)
+    operator_notify.review_resolved(record_id=record.id, approved=body.decision == "approve", note=body.note)
     return ReviewOut.from_record(record)
 
 
