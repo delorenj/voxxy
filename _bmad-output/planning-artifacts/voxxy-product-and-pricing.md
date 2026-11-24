@@ -351,7 +351,7 @@ in the second column.
 | G6 | Voice design endpoint: lift `house-voices/build.py` logic to `POST /voices/design`, add the real-person-name refusal and design slots. Today: offline script | voxxy | 2 |
 | G7 | Terms drafts: hosted terms, acceptable use, self-hosted operator terms, takedown and report path, privacy facts. Adapt Gruvato's drafts. Jarad approves every clause | voxxy (drafts), store (published pages) | 2 |
 | G8 | `.launch.yaml` in Voxxy (`mode: launch`, `live:` block when live) so it joins Holocene's Live shelf; a Voxxy go-live ticket on its board | voxxy | 0.5 |
-| G9 | Store: `/voxxy/` page, two checkout gates, policy entry, privacy section, thanks pages, index card, guide. All gates off until authorized | automaticai-store | 3 |
+| G9 | Store: `/voxxy/` page, two checkout gates, policy entry, privacy section, thanks pages, index card, guide. All gates off until authorized. **Built and deployed with every gate off 2026-11-23** (store `3967f0a`): `checkoutSelfhosted` and `checkoutHosted` staged on the preview page, policy entry that authorizes nothing yet, thanks, guide and privacy pages live; nothing for sale | automaticai-store | 3 |
 | G10 | Store issuer: per-product catalog entry so Earshot and Voxxy share one issuer. Earshot's behavior must not change. **Built 2026-11-23** (store `40d9a91`, earshot `fd9a9cc`): `licensing/issuer.py` in the store with `PRODUCTS`; Earshot unchanged (byte-for-byte golden, its 68 tests pass, real ledgers read identically); Voxxy entry refuses live issuance until its link and signing key exist | automaticai-store (move from earshot) | 1 |
 | G11 | Stripe webhook to admin API for hosted subscriptions | voxxy | 2 |
 | G12 | HeyMa: the Voxxy adapter and tray row (V1), the "HeyMa family" tag in the store listing, then a local pre-check that uses Wax's registry to pick a clean own-voice window and test the match before upload | HeyMa | 2 for V1, later for the rest |
@@ -434,6 +434,25 @@ It has no live payment link and no signing key, so live issuance refuses before 
 To sell: create the signing key (vault item; public key into both the store's
 `VOXXY_TRUSTED_PUBLIC_KEYS` and Voxxy's `TRUSTED_PUBLIC_KEYS`), then the Stripe product and link
 (N14), then pin them in a private approved catalog.
+
+G9 built and deployed 2026-11-23 (store `3967f0a`), every gate off. The store now lets an app
+name its own checkout gates (`checkoutGates` in `scripts/policy.mjs`; default `checkout`), so the
+leak check allows a payment reference only while one of them is on. Voxxy has `checkoutSelfhosted`
+($49, needs `guide`, `support`, `terms` and its `link`) and `checkoutHosted` (Solo and Studio links,
+needs the self-hosted gate, `support` and `hostedTerms`). The staged blocks carry the N10 card copy,
+the "you are the operator" note with the operator-terms link, the N15 EU/EEA note, manual delivery
+within 24 hours, and the hosted Solo/Studio card ("we check", US only, best effort). Payment links
+live in `golive.json`, never in the page. The `voxxy` policy entry has `authorization: null`, so no
+gate can open until Jarad's go-live ticket exists. Live and public now, selling nothing: the preview
+page (unchanged as served), `/voxxy/guide/` (from the bundle README plus the license step),
+`/voxxy/privacy/` and the `/privacy/#voxxy` section (self-hosted claims checked against the app, CLI
+and bundle; hosted says its terms come before it opens), `/voxxy/thanks/` and `/voxxy/thanks/hosted/`.
+Tests: store 83 pass (8 new Voxxy tests, a generic checkout-gates test); build, leak check, layout
+and live checks pass. To open self-hosted: operator terms page (G7) at a URL for `terms.url`, the
+Stripe link with terms acceptance and billing country (N12, N14, N15) for `checkoutSelfhosted.link`,
+the go-live ticket pattern in the `voxxy` policy entry, then products.json `on-sale` with the $49
+offer in the same change. When self-hosted goes on sale the product-level sign-up disappears, so the
+hosted waitlist needs a per-edition sign-up first (not built).
 
 ### The questions as originally asked
 
