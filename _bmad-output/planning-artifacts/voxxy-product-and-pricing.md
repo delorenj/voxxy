@@ -1,8 +1,10 @@
 # Voxxy as a product: editions, pricing, keys and store listing
 
-Status: planning only, 2026-11-23. No code, no store changes, no Stripe objects,
-nothing published, no spending. Every price below is a recommendation until Jarad
-answers section 10.
+Status: **decided 2026-11-23** (section 10). Jarad delegated N1 to N16 ("answer the rest on my
+behalf. I trust your judgement", relayed draft); the agent decided them after three independent
+reviews (economics, risk, operator time). Where a decision below differs from the body of this
+doc, the decision wins. Still nothing created in Stripe, nothing published, no spending: the
+go-live ticket per product (N14) is the one thing Jarad signs.
 
 Level (pillar `belsky-doctrine`): the ask names Voxxy. This plan is the AutomaticAI
 store's selling pattern for **any second-and-later product**: one product page, a
@@ -374,9 +376,32 @@ Both products' page sections ship in step 1; only the hosted gate waits.
 | ElevenLabs prices | Read from elevenlabs.io/pricing on 2026-11-23; promotional discounts were showing and prices will drift. Recheck on the day the page goes up |
 | Not checked | VibeVoice's exact license text, Stripe's acceptable-use rules, ElevenLabs output terms, real throughput of the GPU under load, TitaNet match thresholds for consent clips, legal status of voiceprints by region |
 
-## 10. Needs Jarad
+## 10. Decisions (2026-11-23, on Jarad's behalf)
 
-Each row has a recommendation and the default used if you say nothing.
+| # | Decision | Why |
+|---|---|---|
+| N1 | One **Voxxy** card on store.automaticai.io with a "HeyMa family" tag. A `/heyma/` umbrella page only when a second HeyMa product is for sale | All three reviews agreed: an umbrella with one product adds a click and sells nothing |
+| N2 | Hosted beta sells **Solo $9/mo (150k characters)** and **Studio $19/mo (600k)**, monthly only. Studio's clone slots are styles of the same person's voice. **Team ($59) and annual prices wait** for G1, G2, G11 and the end of the beta | One account holds one person's voiceprint, so Team's seats can't be delivered yet; prepaid annual plans on a best-effort home GPU turn an outage into refunds on the Stripe account Earshot shares |
+| N3 | Self-hosted **$49 once, 12 months of updates**, the last version runs forever. No renewal price announced until there is a year of changelog to renew against | Best margin (about $47 net, no running cost); a renewal price at zero users prices an offer that does not exist |
+| N4 | **Self-hosted first.** Its gate opens when N10 copy, the N11 bundle, the N12 batch 1 terms and the N14 Stripe check are done. Hosted reads "Opens soon" with a waitlist (email only) and opens after G1, G2, G3 and G11 | Self-hosted costs no GPU and no review time; the waitlist is the only demand signal before 8+ days of hosted billing work |
+| N5 | Hosted cap **10**, raised to **25** after recalibrating on about 50 real consent pairs and the G11 webhook, to **50** only after G3 measures throughput | The binding cost is review minutes, not the GPU: most genuine first voices land in review |
+| N6 | **No free tier.** Promotion codes for testers, a demo video, and a static page of pre-rendered house and designed voices | A free cloning tier on a check a clone can beat is the cheapest abuse path; pre-rendered samples cost no GPU |
+| N7 | Hosted runs on the home 3090, **best effort, no SLA**, said on the page, with a status line. Revisit at 25 paying subscribers or about $300/mo | A rented GPU (about $150-300/mo) loses money before then; saying "no SLA" up front prevents "not as described" disputes |
+| N8 | **Never** for customer keys. Root key only; a customer whose engine is down gets a 503 with a retry hint | One full Solo quota through ElevenLabs costs about $25 against $9 of revenue |
+| N9 | **VoxCPM2 only** in both editions. VibeVoice stays out of anything sold | Research-only license, watermarked output |
+| N10 | Self-hosted card: "**Your hardware, your data.** Run Voxxy on your own NVIDIA GPU: nothing leaves your machine and there is no meter. $49 once, with 12 months of updates." Comparison row: "Voices you have the rights to. Your responsibility." "You are the operator" lives in the operator terms and a checkout checkbox. Hosted copy says "we check", never "verified identity" or "deepfake-proof". Demos use house, designed or Jarad's own voice only. Never "clone anyone" or "no restrictions" | Implied, never advertised (Q4); keeps the page clear of Stripe's "facilitates infringement" language |
+| N11 | The sold bundle ships **no fleet, celebrity or character voices, no personas, and no web-search/YouTube clone flow**, not even as an optional plugin. Before the self-hosted gate opens, move the persona files and the `voice_clone` flow out of the **public** `delorenj/voxxy` repo into a private fleet-only repo (G4) | A plugin the seller distributes is still the seller's product; the public repo would otherwise undercut the page |
+| N12 | Adapt Gruvato's drafts in two batches. **Batch 1 (before self-hosted):** operator terms, 14-day refunds, email support best effort within 3 business days with 30 days of install help, terms acceptance required at checkout (`consent_collection.terms_of_service=required`). **Batch 2 (before hosted):** hosted terms, acceptable use, takedown, the customer's warranty that the voice is their own, a biometric notice and release checkbox before the first recording, a published retention schedule (embeddings deleted within 30 days of deleting the voice or account; consent audio and records purged 12 months after the voice is deleted; never sold or shared). Hosted: refund on the first charge within 14 days, renewals non-refundable, cancellation at period end | Illinois BIPA and Texas CUBI require a written release and a retention schedule for voiceprints, and the code keeps them forever today (gap: purge job, G7) |
+| N13 | **Every hosted account's first voice goes to a person, whatever it scores** (built and live, voxxy `d678325`, `VOX_CONSENT_REVIEW_FIRST`). Later voices auto-accept at 0.70 or above against that reviewed voiceprint and are refused below 0.10. Reviews cleared within 24 hours, batched with key issuance. Build "second refusal goes to review" before the cap rises above 10 | A clone reads the code and scores 0.87-0.90; with nothing to compare the first voice against, auto-accepting it was the whole attack |
+| N14 | Use the existing Automatic AI LLC Stripe account. Before the first live link: describe the business as AI text-to-speech software, keep cloning-of-others wording out of product names, and **ask Stripe support in writing** whether the product is supported, attaching the reply to the go-live ticket. Create the self-hosted product and link when G4 ships; hosted prices and the portal only at the hosted gate. **Each go-live ticket is signed by Jarad** (store policy) | Stripe's restricted list does not name voice cloning, but its catch-all is discretionary; a written answer costs nothing. A second Stripe account under the same LLC would not isolate a closure anyway |
+| N15 | Hosted: **US buyers only** at launch, with the N12 biometric release and retention schedule. Self-hosted: anywhere Earshot sells **except the EU/EEA** until output carries a machine-readable synthetic-audio mark (EU AI Act Art. 50, in force since 2026-08-02). Payment links collect billing country; out-of-scope orders are refunded before a key is issued. Tax as Earshot (not collected until traction, HOLOC-47) | US-only does not escape BIPA, so the release is needed anyway; VoxCPM2 output carries no mark |
+| N16 | Yes, as a policy now: the Wax registry may only offer clips of the **account holder's own identity**, never other speakers in it, and never replaces the hosted consent check. Build the G12 pre-check only once hosted has paying customers | The registry holds family members and call participants; a picker across all of it would clone anyone |
+
+New gaps these decisions add: a consent-data purge job and the biometric release step (G7/G5),
+the waitlist on the store page (G9), moving personas and `voice_clone` to a private repo (G4),
+"second refusal goes to review" (G5), and an EU/EEA exclusion at checkout (G9).
+
+### The questions as originally asked
 
 | # | Decision | Recommendation | Default |
 |---|---|---|---|

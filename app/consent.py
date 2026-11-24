@@ -289,9 +289,7 @@ REASON_ACCOUNT_MISMATCH = (
 REASON_ASR_UNSURE = "We were not sure we heard every word, so a person will take a look at your recording."
 REASON_SPEAKER_UNSURE = "We could not tell for sure that the recordings match, so a person will take a look at your recording."
 REASON_MODEL_CHANGED = "This account's voiceprint was made by an older version of the check, so a person will take a look at your recording."
-REASON_FIRST_VOICE = (
-    "This is the first voice on your account, so a person will take a look at your recording before it is ready."
-)
+REASON_FIRST_VOICE = "Every account's first voice is checked by a person."
 REASON_ACCEPTED = "Your recording matched the sentence, the code and your voice."
 REASON_UNAVAILABLE = "The consent check could not run."
 
