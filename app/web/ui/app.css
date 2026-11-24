@@ -484,3 +484,7 @@ body[data-state="booting"] .tabs { visibility: hidden; }
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
   .arcs[data-active="true"] .arc { opacity: 1; }
 }
+
+/* a deploy happened while the page was open */
+.update-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; width: calc(100% - 2 * var(--gutter)); max-width: calc(62rem - 2 * var(--gutter)); margin: 16px auto 0; padding: 12px 16px; border-radius: var(--radius-sm); background: var(--surface); box-shadow: inset 0 0 0 1px var(--accent); }
+.update-banner p { margin: 0; flex: 1 1 16rem; }

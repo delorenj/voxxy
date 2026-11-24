@@ -47,6 +47,7 @@ Environment:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 import json
@@ -635,7 +636,7 @@ async def healthz():
                 ready = False
         engines.append({"name": e.name, "ready": ready})
     overall = any(e["ready"] for e in engines)
-    return {"status": "ok" if overall else "degraded", "engines": engines}
+    return {"status": "ok" if overall else "degraded", "engines": engines, "ui_version": ui_version()}
 
 
 # ---------- web app ----------
@@ -654,6 +655,36 @@ class _NoCacheStatic(StaticFiles):
         response = super().file_response(*args, **kwargs)
         response.headers["Cache-Control"] = "no-cache"
         return response
+
+
+RELEASE_REQUIRED_DETAIL = (
+    "Please read and accept the notice about how your recording and voiceprint are kept, then try again. "
+    "If you see no notice above the Save button, reload the page: Voxxy was updated after you opened it.")
+
+
+def _consent_release_public() -> dict:
+    return {"version": edition_mod.CONSENT_RELEASE_VERSION, "text": edition_mod.CONSENT_RELEASE_TEXT}
+
+
+_ui_version_cache: tuple[tuple, str] | None = None
+
+
+def ui_version() -> str:
+    """A short hash of the web app's files. An open page compares it with the one it booted with, so a
+    tab left open across a deploy can say "reload" instead of running old code against a new server.
+    Rehashed only when a file's size or mtime changes; "" when no web app is bundled."""
+    global _ui_version_cache
+    files = sorted(p for p in WEB_DIR.rglob("*") if p.is_file()) if WEB_DIR.is_dir() else []
+    sig = tuple((str(p), st.st_size, st.st_mtime_ns) for p in files for st in [p.stat()])
+    if _ui_version_cache and _ui_version_cache[0] == sig:
+        return _ui_version_cache[1]
+    if not files:
+        return ""
+    h = hashlib.sha256()
+    for p in files:
+        h.update(str(p.relative_to(WEB_DIR)).encode() + b"\0" + p.read_bytes() + b"\0")
+    _ui_version_cache = (sig, h.hexdigest()[:12])
+    return _ui_version_cache[1]
 
 
 def _public_base_url(request: Request) -> str:
@@ -699,10 +730,9 @@ async def app_config(request: Request) -> dict:
             "sink": True,
         },
         # the biometric release the hosted edition shows before recording; the self edition has none
-        "consent_release": {
-            "version": edition_mod.CONSENT_RELEASE_VERSION,
-            "text": edition_mod.CONSENT_RELEASE_TEXT,
-        } if hosted else None,
+        "consent_release": _consent_release_public() if hosted else None,
+        # which build of the web app this server serves; an open page compares it to spot a deploy
+        "ui_version": ui_version(),
         # the self-hosted license state (soft: Voxxy runs either way); the hosted edition has none
         "license": None if hosted else _license_public(license_mod.current()),
     }
@@ -1516,7 +1546,7 @@ async def create_own_voice(
     reference: Optional[UploadFile] = File(None, description="Optional longer sample (10-30 s) to make the voice from"),
     release_accepted: Optional[str] = Form(
         None, description="Hosted edition: must be true/1/on/yes, the person accepted the biometric release"),
-) -> OwnVoiceOut:
+) -> Any:
     """Add the caller's own voice from a live recording of a challenge sentence and code, through the
     consent gate (app/consent.py): ASR checks the sentence and code, speaker embeddings check the
     recording against the optional longer ``reference`` sample and against the account's voiceprint.
@@ -1534,8 +1564,11 @@ async def create_own_voice(
     The voice is made from ``reference`` when given, otherwise from the consent recording.
     """
     if edition_mod.is_hosted() and not edition_mod.release_accepted(release_accepted):
-        raise HTTPException(
-            422, "Please read and accept the notice about how your recording and voiceprint are kept, then try again.",
+        # The body carries the notice itself, so a client that never showed it (an API caller, or a page
+        # opened before the release existed) can show it now instead of asking for a box it never drew.
+        return JSONResponse(
+            status_code=422,
+            content={"detail": RELEASE_REQUIRED_DETAIL, "release": _consent_release_public()},
             headers={"X-Vox-Error": "release_required"})
     slug = _voice_slug(name)
     display_name = display_name.strip()

@@ -638,3 +638,16 @@ def test_unreadable_upload_to_post_voices_is_422(env) -> None:
         files={"audio": ("clip.m4a", b"not audio at all", "audio/mp4")},
     )
     assert r.status_code == 422
+
+
+# ------------------------------------------------------------------ a page left open across a deploy
+
+def test_ui_version_is_served_and_follows_the_web_files(env, monkeypatch, tmp_path) -> None:
+    v = env.client.get("/app-config").json()["ui_version"]
+    assert v and len(v) == 12
+    web = tmp_path / "web"
+    shutil.copytree(main.WEB_DIR, web)
+    monkeypatch.setattr(main, "WEB_DIR", web)
+    assert main.ui_version() == v, "same files, same version"
+    (web / "ui" / "make.js").write_text((web / "ui" / "make.js").read_text() + "\n// changed\n")
+    assert main.ui_version() != v, "a changed file is a new version"

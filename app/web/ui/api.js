@@ -36,11 +36,12 @@ export const setVoice = (value) => (value ? store.set(VOICE, value) : store.del(
 export const SINK_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export class ApiError extends Error {
-  constructor(status, message, kind, code = "") {
+  constructor(status, message, kind, code = "", body = null) {
     super(message);
     this.status = status;
     this.kind = kind; // "network" | "auth" | "http"
     this.code = code; // the server's X-Vox-Error, e.g. "consent_rejected"
+    this.body = body; // the parsed JSON body, when there was one (e.g. the release with release_required)
   }
 }
 
@@ -90,7 +91,7 @@ export async function api(path, { method = "GET", json, form, signal, key } = {}
   }
   if (!res.ok) {
     if (res.status === 401 && key === undefined) events.dispatchEvent(new Event("unauthorized"));
-    throw new ApiError(res.status, detailText(data), res.status === 401 ? "auth" : "http", res.headers.get("x-vox-error") || "");
+    throw new ApiError(res.status, detailText(data), res.status === 401 ? "auth" : "http", res.headers.get("x-vox-error") || "", data);
   }
   return data;
 }

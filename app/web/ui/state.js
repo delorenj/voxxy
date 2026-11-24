@@ -4,6 +4,8 @@ import { getConfig, getHealth, listVoices } from "./api.js";
 
 export const state = {
   config: null,
+  uiVersion: "", // the web app build this page booted with (from /app-config)
+  stale: false, // the server now serves a newer build than this page runs
   voices: null, // null until loaded
   health: { level: "unknown", text: "Checking", detail: "" },
 };
@@ -18,6 +20,7 @@ const emit = (name, detail) => bus.dispatchEvent(new CustomEvent(name, { detail 
 
 export async function loadConfig() {
   state.config = await getConfig();
+  noteUiVersion(state.config?.ui_version);
   return state.config;
 }
 
@@ -36,9 +39,17 @@ export function invalidateVoices() {
   state.voices = null;
 }
 
+// The first build seen is the one this page runs; any later different one means the server was updated.
+function noteUiVersion(v) {
+  if (!v) return;
+  if (!state.uiVersion) { state.uiVersion = v; return; }
+  if (v !== state.uiVersion && !state.stale) { state.stale = true; emit("stale", v); }
+}
+
 export async function refreshHealth() {
   try {
     const h = await getHealth();
+    noteUiVersion(h.ui_version);
     const ready = (h.engines || []).filter((e) => e.ready).map((e) => e.name);
     const down = (h.engines || []).filter((e) => !e.ready).map((e) => e.name);
     if (h.status === "ok" && ready.length) {

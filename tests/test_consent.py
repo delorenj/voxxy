@@ -727,3 +727,13 @@ def test_app_config_carries_the_release_in_hosted_only(env, monkeypatch) -> None
     assert "30 days" in body["consent_release"]["text"] and "12 months" in body["consent_release"]["text"]
     monkeypatch.setenv("VOX_EDITION", "self")
     assert env.client.get("/app-config").json()["consent_release"] is None
+
+
+def test_release_refusal_carries_the_notice_and_tells_an_old_page_to_reload(env, make_wav) -> None:
+    # A page opened before the release existed never drew it: the refusal must carry the notice so a
+    # client can show it, and its message must say what to do on a page that shows nothing.
+    r = _own(env, _challenge(env), make_wav, release=None)
+    assert r.status_code == 422 and r.headers["x-vox-error"] == "release_required"
+    body = r.json()
+    assert body["release"] == {"version": edition_mod.CONSENT_RELEASE_VERSION, "text": edition_mod.CONSENT_RELEASE_TEXT}
+    assert "reload the page" in body["detail"]

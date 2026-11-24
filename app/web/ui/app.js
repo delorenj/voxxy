@@ -91,6 +91,19 @@ keyForget.addEventListener("click", () => {
   if (state.config?.auth_required) showGate("Enter a key to keep using Voxxy.");
 });
 
+// A deploy replaced the web app while this page was open: old code can disagree with the new server
+// (it may not know a step the server now asks for), so say so and offer a reload. Not automatic: the
+// person may be halfway through a recording.
+on("stale", () => {
+  if (document.getElementById("update-banner")) return;
+  const reload = h("button", { class: "btn btn--primary", type: "button" }, "Reload");
+  reload.addEventListener("click", () => location.reload());
+  const banner = h("div", { class: "update-banner", id: "update-banner", role: "status" },
+    h("p", {}, "Voxxy has been updated since you opened this page. Reload to use the new version. Anything you have not saved yet will be lost."),
+    reload);
+  main.before(banner);
+});
+
 events.addEventListener("unauthorized", () => {
   if (!state.config?.auth_required || document.body.dataset.state === "gate") return;
   forgetKey();

@@ -117,7 +117,8 @@ function recordPath({ done, edition }) {
   const name = nameField({ kind: "own", hint: "What you will call this voice." });
   const sample = sampleStep({ allowUpload: edition !== "hosted" });
   // The hosted edition asks for a biometric release before a voice is recorded and stored.
-  const release = edition !== "self" && state.config?.consent_release ? state.config.consent_release : null;
+  // let: a refusal can carry a release this page did not know about (see save()).
+  let release = edition !== "self" && state.config?.consent_release ? state.config.consent_release : null;
   const flow = h("div", { class: "steps" });
   const errors = errorBox();
   const stepEl = (state_, title, body) =>
@@ -280,7 +281,16 @@ function recordPath({ done, edition }) {
         done(ownVoiceSaved(voice, () => done(null)));
       } catch (err) {
         if (err instanceof ApiError && err.code === "release_required") {
-          errors.show("Please read the notice above and tick the box to accept it, then press Save voice again. Your recording is still here.");
+          if (!release && err.body?.release?.text) {
+            // The server asks for a release this page was never told about (its config predates it):
+            // draw the notice from the refusal itself, keeping the recording.
+            release = err.body.release;
+            accepted = false;
+            render();
+          }
+          errors.show(release
+            ? "Please read the notice above and tick the box to accept it, then press Save voice again. Your recording is still here."
+            : "The server asks you to accept a notice this page cannot show. Reload the page and record again.");
           releaseBox?.focus();
         } else if (err instanceof ApiError && err.code === "consent_rejected") {
           // The check ran and did not accept this recording. The sentence is used up: a new one is needed.
