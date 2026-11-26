@@ -28,7 +28,11 @@ CLONING_ENGINES = frozenset({"voxcpm", "vibevoice"})
 
 DEFAULT_BASE_URL = "https://vox.delo.sh"
 DEFAULT_VOICE = "rick"
-DEFAULT_TIMEOUT_SECONDS = 60.0
+# One /synthesize-url call must finish inside this. VoxCPM runs at roughly
+# 20 characters of input per second, so the fleet base caps each chunk with
+# ``tts.vox.max_text_length`` (Hermes splits long replies on sentences) and
+# this budget leaves headroom for a busy GPU. ``tts.vox.timeout`` overrides it.
+DEFAULT_TIMEOUT_SECONDS = 120.0
 _FORMAT_SUFFIX = {
     "wav": ".wav",
     "mp3": ".mp3",
@@ -51,14 +55,16 @@ class VoxTTSProvider(TTSProvider):
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         default_voice: Optional[str] = None,
-        timeout: float = DEFAULT_TIMEOUT_SECONDS,
+        timeout: Optional[float] = None,
         ffmpeg_binary: Optional[str] = None,
         transport: Optional[httpx.BaseTransport] = None,
     ) -> None:
         self._base_url = base_url
         self._api_key = api_key
         self._default_voice = default_voice
-        self._timeout = float(timeout)
+        # None = read ``tts.vox.timeout`` per request, so a config edit applies
+        # without re-registering the plugin.
+        self._timeout = float(timeout) if timeout is not None else None
         self._ffmpeg_binary = ffmpeg_binary
         self._transport = transport
 
@@ -256,6 +262,16 @@ class VoxTTSProvider(TTSProvider):
         configured = self._base_url or self._service_config().get("base_url") or os.environ.get("VOX_URL") or DEFAULT_BASE_URL
         return str(configured).strip().rstrip("/") or DEFAULT_BASE_URL
 
+    def _resolve_timeout(self) -> float:
+        if self._timeout is not None:
+            return self._timeout
+        configured = self._service_config().get("timeout")
+        try:
+            value = float(configured)
+        except (TypeError, ValueError):
+            return DEFAULT_TIMEOUT_SECONDS
+        return value if value > 0 else DEFAULT_TIMEOUT_SECONDS
+
     def _resolve_default_voice(self) -> str:
         configured = self._default_voice or self._service_config().get("voice") or DEFAULT_VOICE
         return str(configured).strip() or DEFAULT_VOICE
@@ -318,7 +334,7 @@ class VoxTTSProvider(TTSProvider):
         url = path_or_url if path_or_url.startswith(("http://", "https://")) else f"{self._resolve_base_url()}{path_or_url}"
         try:
             with httpx.Client(
-                timeout=self._timeout,
+                timeout=self._resolve_timeout(),
                 headers=self._headers(),
                 follow_redirects=True,
                 transport=self._transport,
@@ -413,8 +429,13 @@ _OP_REF_CACHE: Dict[str, Optional[str]] = {}
 
 
 def _read_op_ref(ref: str) -> Optional[str]:
-    """`op read <ref>`, cached per process. None when op is missing or the read fails."""
-    if ref not in _OP_REF_CACHE:
+    """`op read <ref>`, cached per process. None when op is missing or the read fails.
+
+    Only a successful read is cached. Caching a failure poisoned the whole
+    gateway process: one slow or failed `op read` left every later request
+    unauthenticated (401) until the gateway restarted.
+    """
+    if not _OP_REF_CACHE.get(ref):
         import subprocess
 
         try:
@@ -423,5 +444,8 @@ def _read_op_ref(ref: str) -> Optional[str]:
             value = done.stdout.strip() if done.returncode == 0 else ""
         except (OSError, subprocess.TimeoutExpired):
             value = ""
-        _OP_REF_CACHE[ref] = value or None
+        if not value:
+            logger.warning("vox: could not read the API key reference %s; this request goes unauthenticated", ref)
+            return None
+        _OP_REF_CACHE[ref] = value
     return _OP_REF_CACHE[ref]

@@ -42,10 +42,22 @@ tts:
   vox:
     base_url: https://vox.delo.sh
     voice: rick
+    max_text_length: 500
+    timeout: 120
 ```
 
+**Long replies need `max_text_length`.** A plugin provider has no built-in cap,
+so Hermes falls back to 4,000 characters per request. VoxCPM reads about 20
+characters a second, so any reply over ~1,250 characters used to outlive the
+request timeout, and no voice note was sent at all. With `max_text_length: 500`, Hermes
+splits the reply on sentences, synthesizes each chunk (~25 s), and joins the
+audio. `timeout` is the seconds one request may take (default 120); the plugin
+reads it per request.
+
 For a protected deployment, put the secret in `VOX_API_KEY` (or
-`tts.vox.api_key`); it is sent as Bearer and `X-API-Key` authentication.
+`tts.vox.api_key`), or a 1Password reference in `VOX_API_KEY_REF` (or
+`tts.vox.api_key_ref`); it is sent as Bearer and `X-API-Key` authentication. A
+failed reference read is retried on the next request, never cached.
 
 ## Per-agent voices on a shared config (`VOX_VOICE`)
 

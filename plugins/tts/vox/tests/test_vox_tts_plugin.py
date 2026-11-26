@@ -290,3 +290,54 @@ def test_api_key_ref_is_read_once_through_op(monkeypatch):
     assert provider._headers()["Authorization"] == "Bearer vault-key"
     assert provider._headers()["X-API-Key"] == "vault-key"
     assert calls == [["op", "read", "--no-newline", "op://DeLoSecrets/item/credential"]]
+
+
+def test_failed_api_key_ref_read_is_retried_not_cached(monkeypatch):
+    import subprocess
+
+    module = _load_plugin_module()
+    results = iter([
+        subprocess.CompletedProcess([], 1, stdout="", stderr="op: timeout"),
+        subprocess.CompletedProcess([], 0, stdout="vault-key\n", stderr=""),
+    ])
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        return next(results)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_OP_REF_CACHE", {})
+    monkeypatch.delenv("VOX_API_KEY", raising=False)
+    monkeypatch.setenv("VOX_API_KEY_REF", "op://DeLoSecrets/item/credential")
+    provider = module.VoxTTSProvider(base_url="https://vox.example")
+    assert "Authorization" not in provider._headers()
+    assert provider._headers()["Authorization"] == "Bearer vault-key"
+    assert provider._headers()["Authorization"] == "Bearer vault-key"
+    assert len(calls) == 2
+
+
+def test_timeout_comes_from_tts_vox_config(monkeypatch):
+    module = _load_plugin_module()
+    provider = module.VoxTTSProvider(base_url="https://vox.example")
+    monkeypatch.setattr(module.VoxTTSProvider, "_service_config", staticmethod(lambda: {"timeout": 150}))
+    assert provider._resolve_timeout() == 150.0
+    monkeypatch.setattr(module.VoxTTSProvider, "_service_config", staticmethod(lambda: {"timeout": "junk"}))
+    assert provider._resolve_timeout() == module.DEFAULT_TIMEOUT_SECONDS
+    monkeypatch.setattr(module.VoxTTSProvider, "_service_config", staticmethod(lambda: {}))
+    assert provider._resolve_timeout() == module.DEFAULT_TIMEOUT_SECONDS == 120.0
+    assert module.VoxTTSProvider(timeout=5)._resolve_timeout() == 5.0
+
+
+def test_request_uses_the_configured_timeout(monkeypatch):
+    module = _load_plugin_module()
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["timeout"] = request.extensions.get("timeout")
+        return httpx.Response(200, json={"status": "ok"})
+
+    monkeypatch.setattr(module.VoxTTSProvider, "_service_config", staticmethod(lambda: {"timeout": 150}))
+    provider = module.VoxTTSProvider(base_url="https://vox.example", transport=httpx.MockTransport(handler))
+    provider._get_json("/healthz")
+    assert seen["timeout"]["read"] == 150.0

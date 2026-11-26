@@ -17,4 +17,9 @@ tts:
   vox:
     base_url: https://vox.delo.sh
     voice: rick
+    # Hermes splits long replies on sentences into chunks of at most this many
+    # characters. VoxCPM reads ~20 chars/s, so 500 keeps each request ~25 s.
+    max_text_length: 500
+    # Seconds one /synthesize-url request may take (default 120).
+    timeout: 120
     # api_key: ${VOX_API_KEY}
