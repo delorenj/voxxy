@@ -1,0 +1,32 @@
+# Written by `forever-ago adopt` on 2026-11-26 from forever-ago-voxxy-voices.service.
+# mode = "adopted": the legacy job captures and prunes by its own flags. Emma records
+# and checks it and never runs, prunes or reschedules it. Candybar owns when.
+schema_version = 1
+
+[[emmas]]
+id          = "voices"
+description = "Weekly local tarball snapshot of voxxy reference voices (keep newest 1, Audacity projects excluded)"
+mode        = "adopted"
+
+[emmas.source]
+kind = "files"
+path = "voices"
+exclude = ["*.aup4", "*.aup4-wal", "*.aup4-shm"]
+
+[emmas.capture]
+strategy = "files@1"
+
+[emmas.backend]
+strategy = "tar-gz-dir@1"
+dir      = "~/backups"
+prefix   = "voxxy-voices"
+
+[emmas.retention]
+strategy = "legacy-count@1"
+keep     = 1
+
+[emmas.fidelity]
+strategy = "full@1"
+
+[emmas.candybar]
+ref = "forever-ago-voxxy-voices"
